@@ -1,0 +1,28 @@
+[workspace]
+name = "izhiclust"
+version = "0.1.0"
+description = "Izhikevich spiking-neuron cluster discovery (GPU)"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.12.*"
+numpy = "*"
+scipy = "*"
+pandas = "*"
+matplotlib = "*"
+scikit-learn = "*"
+umap-learn = "*"
+hdbscan = "*"
+cupy = "*"
+cuda-version = "13.*"
+tqdm = "*"
+pytest = "*"
+
+[activation.env]
+PYTHONPATH = "src"
+
+[tasks]
+run = "python -m izhiclust.pipeline"
+quick = "python -m izhiclust.pipeline --quick"
+test = "pytest -q tests"

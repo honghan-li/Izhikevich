@@ -1,0 +1,33 @@
+# Generated pipeline artifacts (all regenerable from src/)
+/data/
+/output/
+
+# pixi environment
+/.pixi
+pixi.lock.bak
+
+# Python bytecode / build
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.ipynb_checkpoints/
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Session transcripts
+/2???-??-??-??????-*.txt

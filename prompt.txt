@@ -1,0 +1,21 @@
+Objective: Write a GPU-accerlerated python program that numerically simulates the Izhikevich model of a spiking neuron to identify as many clusters of interest as possible
+
+Information: The paper is available in @spikes.pdf . We will be varying a,b,c,d, and I. We will be holding I as a constant. Use pixi to set up the python project
+
+Workflow:
+- Sample n sets of coefficients. Use latin hypercube for the first iteration but use a Gaussian Process sampler for all iterations after to maximize information gathered from parameter space
+- Run dormand prince method to similate the PDE
+- Run the DFFT on the solution, truncate away the symmetric part and take the magnitude
+- Repeat workflow m times
+
+Output:
+- Run UMAP and HDBSCAN to dimension reduce the DFFT bins and cluster them into a lower dimensional space
+- Print the mean and correlation matrix of the coefficient vector for each cluster. I would like the correlation matrix to display the correlation between the coefficients on the lower triangular part, the SD on the diagonal part, and remove the upper triangular part for ease of reading
+- Use UMAP to reduce the space into 2D and use matplotlib to create a scatterplot of the clusters. Label them as A, B, C, etc. Display a graph popup and save this image to /output
+- Display the 3 neuron activation patterns closest to the mean for each cluster on a graph and create a new graph for the magnitude plot of each of their fourier bins (with frequencies labelled). Name the files like A1.png, B1.png, etc.
+
+Tasks:
+- Do not code it first. Create a specification detailing the parameters for each step, such as choosing values for n, m, and dormand prince that would allow for as much accuracy as possible without taking too much time on this device.
+- How many dimensions should be reduced using UMAP before running HDBSCAN? What should their parameters be set to?
+- For dormand prince, how long should the simulation be ran such that there is a reasonable amount of spikes for the clustering to be accurate?
+- Are there any suggestions you would give to this workflow which I missed that can better reach the objective?
