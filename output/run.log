@@ -1,0 +1,259 @@
+[    0.1s] izhiclust: N=26624, m=12, matplotlib backend QtAgg
+[    0.5s] convergence gate: 24 probes x 7 step sizes
+[    0.8s]   dt=0.04    L=2    n_out=25000 mean spikes=172.4 max local err=3.58e-05
+[    1.0s]   dt=0.02    L=5    n_out=20000 mean spikes=172.7 max local err=1.47e-06
+[    1.2s]   dt=0.01    L=10   n_out=20000 mean spikes=173.0 max local err=5.26e-08
+[    1.8s]   dt=0.005   L=20   n_out=20000 mean spikes=173.0 max local err=1.79e-09
+[    2.9s]   dt=0.0025  L=40   n_out=20000 mean spikes=173.0 max local err=5.80e-11
+[    5.6s]   dt=0.001   L=100  n_out=20000 mean spikes=173.0 max local err=6.12e-13
+[   10.9s]   dt=0.0005  L=200  n_out=20000 mean spikes=173.0 max local err=1.93e-14
+[   10.9s]   probes: 17 spiking, 4 sensitivity-limited (excluded), 13 used
+[   10.9s]   dt=0.04    rel L2 vs dt=0.001: median 0.30049 p90 0.6247 max 0.7234 (11/13 over 0.01)
+[   10.9s]   dt=0.02    rel L2 vs dt=0.001: median 0.10573 p90 0.2585 max 0.2819 (9/13 over 0.01)
+[   10.9s]   dt=0.01    rel L2 vs dt=0.001: median 0.00942 p90 0.1634 max 0.2078 (6/13 over 0.01)
+[   10.9s]   dt=0.005   rel L2 vs dt=0.001: median 0.00589 p90 0.0548 max 0.0996 (5/13 over 0.01)
+[   10.9s]   dt=0.0025  rel L2 vs dt=0.001: median 0.00084 p90 0.0104 max 0.0970 (2/13 over 0.01)
+[   10.9s]   dt=0.001   rel L2 vs dt=0.001: median 0.00000 p90 0.0000 max 0.0000 (0/13 over 0.01)
+[   10.9s]   selected dt_int = 0.0025 ms (coarsest with median <= 0.0025; spec default 0.01 has median 0.00942)
+[   13.1s]   aliasing: vs dt_out=0.0125 ms reference, filtered 0.0306 vs naive 0.2160 -> 7.1x (pass, need >= 5x)
+[   14.2s]   dt_out 0.1 -> 0.05 ms: median 0.01174 max 0.0211
+[   15.3s]   P_floor: numerical term 1.318e-01 (18/18 silent references), physical term 7.500e+05 (0.1 mV RMS) -> P_floor 7.500e+05
+[   15.3s] convergence gate: PASS
+[   15.3s] production grid: dt_int=0.0025 ms, L=40, dt_out=0.1 ms, n_steps=1000000, n_out=20000
+[   33.8s] iteration 1/12: n=4096 (total 4096) refined=0 spikes/sample=106.2 zero-spike=0.445 [13.5s]
+[   63.7s]   GP fit on 3000 points; lengthscales (PC1) [3.147 0.02  5.634 3.616]; PC weights [0.802 0.072 0.035 0.032 0.029 0.029]
+[   64.1s]   interim labels: 13 clusters, noise 0.458
+[   74.3s]   acquisition: rank sd 0.600 grad 0.877 entropy 0.811 (shortlist 5736)
+[   81.1s] iteration 2/12: n=2048 (total 6144) refined=0 spikes/sample=62.4 zero-spike=0.444 [47.3s]
+[  106.6s]   GP fit on 3000 points; lengthscales (PC1) [ 4.125  0.02  12.017  6.841]; PC weights [0.813 0.073 0.036 0.027 0.026 0.025]
+[  107.3s]   interim labels: 26 clusters, noise 0.436
+[  117.4s]   acquisition: rank sd 0.494 grad 0.854 entropy 0.786 (shortlist 5736)
+[  124.2s] iteration 3/12: n=2048 (total 8192) refined=0 spikes/sample=57.5 zero-spike=0.559 [43.1s]
+[  154.0s]   GP fit on 3000 points; lengthscales (PC1) [ 8.308  0.02  20.    13.212]; PC weights [0.825 0.067 0.036 0.026 0.024 0.023]
+[  155.0s]   interim labels: 34 clusters, noise 0.347
+[  165.2s]   acquisition: rank sd 0.426 grad 0.833 entropy 0.799 (shortlist 5736)
+[  171.9s] iteration 4/12: n=2048 (total 10240) refined=0 spikes/sample=87.8 zero-spike=0.410 [47.7s]
+[  194.9s]   GP fit on 3000 points; lengthscales (PC1) [ 7.213  0.02  20.     9.355]; PC weights [0.825 0.065 0.034 0.026 0.025 0.024]
+[  196.2s]   interim labels: 36 clusters, noise 0.426
+[  206.2s]   acquisition: rank sd 0.566 grad 0.778 entropy 0.700 (shortlist 5736)
+[  213.0s] iteration 5/12: n=2048 (total 12288) refined=0 spikes/sample=98.6 zero-spike=0.426 [41.1s]
+[  233.4s]   GP fit on 3000 points; lengthscales (PC1) [ 5.388  0.02  15.673  8.807]; PC weights [0.821 0.067 0.036 0.027 0.026 0.024]
+[  234.8s]   interim labels: 40 clusters, noise 0.389
+[  244.9s]   acquisition: rank sd 0.524 grad 0.807 entropy 0.727 (shortlist 5736)
+[  251.7s] iteration 6/12: n=2048 (total 14336) refined=0 spikes/sample=73.6 zero-spike=0.548 [38.7s]
+[  266.4s]   GP fit on 3000 points; lengthscales (PC1) [ 6.532  0.02  15.18   7.801]; PC weights [0.824 0.064 0.035 0.026 0.026 0.024]
+[  268.6s]   interim labels: 34 clusters, noise 0.337
+[  278.8s]   acquisition: rank sd 0.390 grad 0.856 entropy 0.826 (shortlist 5736)
+[  285.6s] iteration 7/12: n=2048 (total 16384) refined=0 spikes/sample=66.2 zero-spike=0.420 [33.9s]
+[  309.8s]   GP fit on 3000 points; lengthscales (PC1) [11.351  0.02  19.81  12.391]; PC weights [0.826 0.063 0.034 0.026 0.026 0.024]
+[  311.1s]   interim labels: 37 clusters, noise 0.404
+[  322.2s]   acquisition: rank sd 0.502 grad 0.754 entropy 0.754 (shortlist 5736)
+[  329.0s] iteration 8/12: n=2048 (total 18432) refined=0 spikes/sample=84.6 zero-spike=0.413 [43.4s]
+[  348.4s]   GP fit on 3000 points; lengthscales (PC1) [ 9.855  0.02  20.    16.519]; PC weights [0.825 0.063 0.034 0.027 0.027 0.025]
+[  349.7s]   interim labels: 36 clusters, noise 0.224
+[  359.9s]   acquisition: rank sd 0.425 grad 0.819 entropy 0.755 (shortlist 5736)
+[  366.6s] iteration 9/12: n=2048 (total 20480) refined=0 spikes/sample=86.8 zero-spike=0.480 [37.7s]
+[  383.6s]   GP fit on 3000 points; lengthscales (PC1) [ 8.72   0.02  20.    13.402]; PC weights [0.824 0.063 0.034 0.027 0.027 0.025]
+[  384.9s]   interim labels: 39 clusters, noise 0.383
+[  395.1s]   acquisition: rank sd 0.470 grad 0.774 entropy 0.783 (shortlist 5736)
+[  401.8s] iteration 10/12: n=2048 (total 22528) refined=0 spikes/sample=77.1 zero-spike=0.427 [35.2s]
+[  416.9s]   GP fit on 3000 points; lengthscales (PC1) [ 9.039  0.02  19.987 12.855]; PC weights [0.825 0.062 0.034 0.027 0.027 0.025]
+[  418.1s]   interim labels: 38 clusters, noise 0.332
+[  428.2s]   acquisition: rank sd 0.441 grad 0.786 entropy 0.783 (shortlist 5736)
+[  435.0s] iteration 11/12: n=2048 (total 24576) refined=0 spikes/sample=85.5 zero-spike=0.425 [33.2s]
+[  459.1s]   GP fit on 3000 points; lengthscales (PC1) [ 4.77   0.02  16.428  8.947]; PC weights [0.825 0.061 0.034 0.028 0.027 0.025]
+[  460.4s]   interim labels: 33 clusters, noise 0.390
+[  470.5s]   acquisition: rank sd 0.452 grad 0.802 entropy 0.779 (shortlist 5736)
+[  477.3s] iteration 12/12: n=2048 (total 26624) refined=0 spikes/sample=76.7 zero-spike=0.435 [42.3s]
+[  478.4s] simulated N=26624; refined at dt/4: 0
+[  478.4s] quarantine: Z=12017 (silent), X=0 (non-finite), clustering on 14607
+[  478.4s]   zero-spike samples 12034, of which 17 retained as subthreshold/resonant
+[  478.5s] PCA: 92 components, cumulative EVR 0.99024 (EVR at 50 components 0.85398; criterion >= 0.99)
+[  478.5s]   §12.1/§17.10: 50 components fall short, so n_components was raised to 92 rather than relaxing the check
+[  503.3s]   [stage1] nn= 15 mcs=  30 ms=  5 leaf: k=261 noise=0.071 rv=0.5109 score=0.5109 (0.1s, tree 0.3s)
+[  503.4s]   [stage1] nn= 15 mcs=  30 ms=  5 eom : k=244 noise=0.053 rv=0.5702 score=0.5702 (0.1s, tree 0.3s)
+[  503.4s]   [stage1] nn= 15 mcs=  60 ms=  5 leaf: k=121 noise=0.121 rv=0.5127 score=0.5127 (0.1s, tree 0.3s)
+[  503.5s]   [stage1] nn= 15 mcs=  60 ms=  5 eom : k=115 noise=0.109 rv=0.5417 score=0.5417 (0.1s, tree 0.3s)
+[  503.5s]   [stage1] nn= 15 mcs= 120 ms=  5 leaf: k= 58 noise=0.127 rv=0.3713 score=0.3713 (0.0s, tree 0.3s)
+[  503.5s]   [stage1] nn= 15 mcs= 120 ms=  5 eom : k= 57 noise=0.120 rv=0.3800 score=0.3800 (0.0s, tree 0.3s)
+[  503.9s]   [stage1] nn= 15 mcs=  30 ms= 10 leaf: k=258 noise=0.064 rv=0.4707 score=0.4707 (0.1s, tree 0.3s)
+[  503.9s]   [stage1] nn= 15 mcs=  30 ms= 10 eom : k=232 noise=0.045 rv=0.5414 score=0.5414 (0.1s, tree 0.3s)
+[  504.0s]   [stage1] nn= 15 mcs=  60 ms= 10 leaf: k=126 noise=0.108 rv=0.5323 score=0.5323 (0.0s, tree 0.3s)
+[  504.0s]   [stage1] nn= 15 mcs=  60 ms= 10 eom : k=118 noise=0.099 rv=0.5822 score=0.5822 (0.0s, tree 0.3s)
+[  504.0s]   [stage1] nn= 15 mcs= 120 ms= 10 leaf: k= 62 noise=0.123 rv=0.4079 score=0.4079 (0.0s, tree 0.3s)
+[  504.1s]   [stage1] nn= 15 mcs= 120 ms= 10 eom : k= 59 noise=0.110 rv=0.4534 score=0.4534 (0.0s, tree 0.3s)
+[  504.4s]   [stage1] nn= 15 mcs=  30 ms= 25 leaf: k=225 noise=0.115 rv=0.3797 score=0.3797 (0.0s, tree 0.3s)
+[  504.4s]   [stage1] nn= 15 mcs=  30 ms= 25 eom : k=183 noise=0.060 rv=0.6003 score=0.6003 (0.0s, tree 0.3s)
+[  504.5s]   [stage1] nn= 15 mcs=  60 ms= 25 leaf: k=117 noise=0.096 rv=0.5036 score=0.5036 (0.0s, tree 0.3s)
+[  504.5s]   [stage1] nn= 15 mcs=  60 ms= 25 eom : k=103 noise=0.063 rv=0.6051 score=0.6051 (0.0s, tree 0.3s)
+[  504.5s]   [stage1] nn= 15 mcs= 120 ms= 25 leaf: k= 59 noise=0.133 rv=0.4443 score=0.4443 (0.0s, tree 0.3s)
+[  504.6s]   [stage1] nn= 15 mcs= 120 ms= 25 eom : k= 58 noise=0.133 rv=0.4583 score=0.4583 (0.0s, tree 0.3s)
+[  523.7s]   [stage1] nn= 30 mcs=  30 ms=  5 leaf: k=259 noise=0.052 rv=0.4200 score=0.4200 (0.1s, tree 0.3s)
+[  523.8s]   [stage1] nn= 30 mcs=  30 ms=  5 eom : k=251 noise=0.043 rv=0.4415 score=0.4415 (0.1s, tree 0.3s)
+[  523.9s]   [stage1] nn= 30 mcs=  60 ms=  5 leaf: k=123 noise=0.071 rv=0.4931 score=0.4931 (0.1s, tree 0.3s)
+[  523.9s]   [stage1] nn= 30 mcs=  60 ms=  5 eom : k=118 noise=0.057 rv=0.5250 score=0.5250 (0.1s, tree 0.3s)
+[  524.0s]   [stage1] nn= 30 mcs= 120 ms=  5 leaf: k= 60 noise=0.105 rv=0.4635 score=0.4635 (0.0s, tree 0.3s)
+[  524.0s]   [stage1] nn= 30 mcs= 120 ms=  5 eom : k= 57 noise=0.101 rv=0.5092 score=0.5092 (0.0s, tree 0.3s)
+[  524.3s]   [stage1] nn= 30 mcs=  30 ms= 10 leaf: k=257 noise=0.063 rv=0.3523 score=0.3523 (0.1s, tree 0.2s)
+[  524.3s]   [stage1] nn= 30 mcs=  30 ms= 10 eom : k=245 noise=0.054 rv=0.3931 score=0.3931 (0.1s, tree 0.2s)
+[  524.4s]   [stage1] nn= 30 mcs=  60 ms= 10 leaf: k=123 noise=0.076 rv=0.4340 score=0.4340 (0.0s, tree 0.2s)
+[  524.4s]   [stage1] nn= 30 mcs=  60 ms= 10 eom : k=113 noise=0.049 rv=0.4836 score=0.4836 (0.0s, tree 0.2s)
+[  524.4s]   [stage1] nn= 30 mcs= 120 ms= 10 leaf: k= 60 noise=0.096 rv=0.3817 score=0.3817 (0.0s, tree 0.2s)
+[  524.5s]   [stage1] nn= 30 mcs= 120 ms= 10 eom : k= 59 noise=0.096 rv=0.4085 score=0.4085 (0.0s, tree 0.2s)
+[  524.7s]   [stage1] nn= 30 mcs=  30 ms= 25 leaf: k=230 noise=0.130 rv=0.2673 score=0.2673 (0.0s, tree 0.2s)
+[  524.7s]   [stage1] nn= 30 mcs=  30 ms= 25 eom : k=206 noise=0.084 rv=0.2942 score=0.2942 (0.0s, tree 0.2s)
+[  524.8s]   [stage1] nn= 30 mcs=  60 ms= 25 leaf: k=118 noise=0.084 rv=0.3595 score=0.3595 (0.0s, tree 0.2s)
+[  524.8s]   [stage1] nn= 30 mcs=  60 ms= 25 eom : k= 99 noise=0.059 rv=0.4611 score=0.4611 (0.0s, tree 0.2s)
+[  524.9s]   [stage1] nn= 30 mcs= 120 ms= 25 leaf: k= 59 noise=0.097 rv=0.3617 score=0.3617 (0.0s, tree 0.2s)
+[  524.9s]   [stage1] nn= 30 mcs= 120 ms= 25 eom : k= 51 noise=0.079 rv=0.4635 score=0.4635 (0.0s, tree 0.2s)
+[  539.5s]   [stage1] nn= 50 mcs=  30 ms=  5 leaf: k=251 noise=0.052 rv=0.3950 score=0.3950 (0.1s, tree 0.2s)
+[  539.6s]   [stage1] nn= 50 mcs=  30 ms=  5 eom : k=246 noise=0.047 rv=0.4196 score=0.4196 (0.1s, tree 0.2s)
+[  539.6s]   [stage1] nn= 50 mcs=  60 ms=  5 leaf: k=127 noise=0.086 rv=0.4131 score=0.4131 (0.1s, tree 0.2s)
+[  539.7s]   [stage1] nn= 50 mcs=  60 ms=  5 eom : k=115 noise=0.057 rv=0.5179 score=0.5179 (0.1s, tree 0.2s)
+[  539.7s]   [stage1] nn= 50 mcs= 120 ms=  5 leaf: k= 66 noise=0.061 rv=0.4679 score=0.4679 (0.0s, tree 0.2s)
+[  539.8s]   [stage1] nn= 50 mcs= 120 ms=  5 eom : k= 61 noise=0.020 rv=0.5319 score=0.5319 (0.0s, tree 0.2s)
+[  540.0s]   [stage1] nn= 50 mcs=  30 ms= 10 leaf: k=255 noise=0.054 rv=0.3548 score=0.3548 (0.1s, tree 0.2s)
+[  540.0s]   [stage1] nn= 50 mcs=  30 ms= 10 eom : k=242 noise=0.046 rv=0.3866 score=0.3866 (0.1s, tree 0.2s)
+[  540.1s]   [stage1] nn= 50 mcs=  60 ms= 10 leaf: k=126 noise=0.078 rv=0.3846 score=0.3846 (0.0s, tree 0.2s)
+[  540.1s]   [stage1] nn= 50 mcs=  60 ms= 10 eom : k=113 noise=0.053 rv=0.4459 score=0.4459 (0.0s, tree 0.2s)
+[  540.2s]   [stage1] nn= 50 mcs= 120 ms= 10 leaf: k= 64 noise=0.073 rv=0.4245 score=0.4245 (0.0s, tree 0.2s)
+[  540.2s]   [stage1] nn= 50 mcs= 120 ms= 10 eom : k= 59 noise=0.041 rv=0.4777 score=0.4777 (0.0s, tree 0.2s)
+[  540.4s]   [stage1] nn= 50 mcs=  30 ms= 25 leaf: k=225 noise=0.119 rv=0.2265 score=0.2265 (0.0s, tree 0.2s)
+[  540.4s]   [stage1] nn= 50 mcs=  30 ms= 25 eom : k=211 noise=0.093 rv=0.2664 score=0.2664 (0.0s, tree 0.2s)
+[  540.5s]   [stage1] nn= 50 mcs=  60 ms= 25 leaf: k=116 noise=0.078 rv=0.3011 score=0.3011 (0.0s, tree 0.2s)
+[  540.5s]   [stage1] nn= 50 mcs=  60 ms= 25 eom : k= 96 noise=0.037 rv=0.4365 score=0.4365 (0.0s, tree 0.2s)
+[  540.6s]   [stage1] nn= 50 mcs= 120 ms= 25 leaf: k= 60 noise=0.050 rv=0.4125 score=0.4125 (0.0s, tree 0.2s)
+[  540.6s]   [stage1] nn= 50 mcs= 120 ms= 25 eom : k= 54 noise=0.038 rv=0.4754 score=0.4754 (0.0s, tree 0.2s)
+[  540.6s] stage-1 winner: nn=15 mcs=60 ms=25 eom (score 0.6051)
+[  549.2s]   [stage2] alpha=0.5: k=102 noise=0.032 rv=0.4600 score=0.4600 (8.6s)
+[  562.4s]   [stage2] alpha=1.0: k=107 noise=0.043 rv=0.4097 score=0.4097 (13.2s)
+[  581.0s] final seeded UMAP(10): 18.6s
+[  581.3s] final clustering: 102 clusters (eom), noise 0.077, relative_validity 0.5416
+[  581.3s]   coarse (leaf): 114 clusters
+[  618.2s] measured: seeded UMAP 18.6s vs unseeded 19.2s (ratio 0.97x, §15 assumed ~4x); tree 0.2s vs extract+score 0.05s (ratio 5x)
+[  656.4s] stability: mean pairwise ARI 0.780 over 5 embeddings of 12000 points (38.2s)
+[  656.5s] contiguity: threshold 0.1074, 69/102 clusters MULTIMODAL
+[  656.5s]   RS  -> AB   (p=1.000, approx_predict AB/1.000)
+[  656.5s]   IB  -> O    (p=1.000, approx_predict noise/0.000)
+[  656.5s]   CH  -> R    (p=0.488, approx_predict AL/1.000)
+[  656.5s]   FS  -> BY   (p=1.000, approx_predict Q/1.000)
+[  656.5s]   LTS -> BH   (p=1.000, approx_predict BH/1.000)
+[  656.5s]   TC  -> AV   (p=0.772, approx_predict AV/0.772)
+[  656.5s]   RZ  -> P    (p=1.000, approx_predict P/1.000)
+[  656.6s]   A — medium tonic (n=365, rate 34 Hz, CV 0.00) [UNSTABLE]
+[  656.6s]   B — medium tonic (n=355, rate 58 Hz, CV 0.00) [MULTIMODAL 2 comp >=5% of 113, largest 15%]
+[  656.6s]   C — slow tonic [mixed: 27% bursting] (n=327, rate 6 Hz, CV 0.00) [MULTIMODAL 4 comp >=5% of 90, largest 14%]
+[  656.6s]   D — medium tonic (n=272, rate 26 Hz, CV 0.00)
+[  656.6s]   E — slow tonic (n=261, rate 10 Hz, CV 0.00) [UNSTABLE]
+[  656.6s]   F — medium tonic [mixed: 20% bursting] (n=247, rate 38 Hz, CV 0.00)
+[  656.6s]   G — medium tonic (n=247, rate 50 Hz, CV 0.00) [UNSTABLE]
+[  656.6s]   H — slow tonic [mixed: 22% bursting] (n=246, rate 11 Hz, CV 0.00)
+[  656.6s]   I — slow tonic [mixed: 36% bursting] (n=239, rate 6 Hz, CV 0.00) [MULTIMODAL 4 comp >=5% of 72, largest 18%]
+[  656.6s]   J — medium tonic (n=220, rate 24 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 147, largest 3%]
+[  656.6s]   K — medium tonic (n=216, rate 36 Hz, CV 0.00) [MULTIMODAL 2 comp >=5% of 109, largest 8%]
+[  656.6s]   L — medium tonic (n=215, rate 41 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 131, largest 4%]
+[  656.6s]   M — medium tonic (n=210, rate 72 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 109, largest 4%]
+[  656.6s]   N — slow tonic [mixed: 24% bursting] (n=200, rate 9 Hz, CV 0.00) [MULTIMODAL 2 comp >=5% of 110, largest 6%]
+[  656.6s]   O — medium tonic (n=198, rate 32 Hz, CV 0.00)
+[  656.6s]   P — fast tonic (n=191, rate 191 Hz, CV 0.00) [MULTIMODAL 2 comp >=5% of 69, largest 16%]
+[  656.6s]   Q — slow tonic (n=186, rate 18 Hz, CV 0.00)
+[  656.6s]   R — slow tonic (n=182, rate 17 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 119, largest 4%]
+[  656.6s]   S — medium tonic (n=178, rate 20 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 110, largest 3%]
+[  656.6s]   T — slow tonic (n=174, rate 19 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 122, largest 3%]
+[  656.6s]   U — medium tonic (n=169, rate 22 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 121, largest 4%]
+[  656.6s]   V — slow tonic (n=165, rate 15 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 108, largest 5%]
+[  656.6s]   W — medium tonic (n=156, rate 44 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 100, largest 4%]
+[  656.6s]   Y — slow tonic [mixed: 20% bursting] (n=152, rate 12 Hz, CV 0.00)
+[  656.6s]   AA — fast tonic (n=149, rate 220 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 3 comp >=5% of 74, largest 6%]
+[  656.6s]   AB — medium tonic (n=149, rate 22 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 104, largest 5%]
+[  656.6s]   AC — medium tonic (n=145, rate 53 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 102, largest 3%]
+[  656.6s]   AD — medium tonic (n=144, rate 55 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 102, largest 4%]
+[  656.6s]   AE — medium tonic (n=142, rate 28 Hz, CV 0.00)
+[  656.6s]   AF — fast tonic (n=142, rate 84 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 83, largest 5%]
+[  656.6s]   AG — medium tonic (n=142, rate 64 Hz, CV 0.00)
+[  656.6s]   AH — slow tonic [mixed: 24% bursting] (n=140, rate 8 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 79, largest 4%]
+[  656.6s]   AI — slow tonic (n=139, rate 14 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 104, largest 3%]
+[  656.6s]   AJ — medium tonic (n=139, rate 61 Hz, CV 0.00)
+[  656.6s]   AK — fast tonic (n=137, rate 94 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 74, largest 4%]
+[  656.6s]   AL — slow tonic (n=136, rate 16 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 100, largest 4%]
+[  656.6s]   AM — medium tonic (n=136, rate 22 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 0 comp >=5% of 99, largest 4%]
+[  656.6s]   AN — fast tonic (n=133, rate 293 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 0 comp >=5% of 92, largest 4%]
+[  656.6s]   AO — medium tonic (n=129, rate 31 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 91, largest 4%]
+[  656.6s]   AP — medium tonic (n=129, rate 30 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 91, largest 3%]
+[  656.6s]   AQ — slow tonic (n=128, rate 18 Hz, CV 0.00) [UNSTABLE]
+[  656.6s]   AR — medium tonic (n=127, rate 20 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 99, largest 5%]
+[  656.6s]   AS — medium tonic (n=126, rate 25 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 100, largest 3%]
+[  656.6s]   AT — medium tonic (n=126, rate 62 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 85, largest 4%]
+[  656.6s]   AU — slow tonic (n=122, rate 20 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 89, largest 3%]
+[  656.6s]   AV — fast tonic (n=121, rate 267 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 3 comp >=5% of 48, largest 18%]
+[  656.6s]   AW — medium tonic (n=121, rate 47 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 89, largest 4%]
+[  656.6s]   AY — slow tonic [mixed: 20% bursting] (n=120, rate 10 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 92, largest 3%]
+[  656.6s]   BA — medium tonic (n=119, rate 78 Hz, CV 0.00) [UNSTABLE]
+[  656.6s]   BB — medium tonic (n=116, rate 32 Hz, CV 0.00)
+[  656.6s]   BC — slow tonic [mixed: 20% bursting] (n=115, rate 12 Hz, CV 0.00)
+[  656.6s]   BD — medium tonic (n=115, rate 68 Hz, CV 0.00)
+[  656.7s]   BE — medium tonic (n=115, rate 40 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 0 comp >=5% of 93, largest 3%]
+[  656.7s]   BF — fast tonic (n=114, rate 108 Hz, CV 0.00)
+[  656.7s]   BG — slow tonic (n=113, rate 14 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 80, largest 4%]
+[  656.7s]   BH — medium tonic (n=111, rate 74 Hz, CV 0.00)
+[  656.7s]   BI — slow tonic (n=109, rate 16 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 80, largest 5%]
+[  656.7s]   BJ — slow tonic (n=109, rate 14 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 86, largest 4%]
+[  656.7s]   BK — slow tonic (n=109, rate 13 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 81, largest 4%]
+[  656.7s]   BL — medium tonic (n=108, rate 29 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 81, largest 5%]
+[  656.7s]   BM — medium tonic [mixed: 20% bursting] (n=108, rate 42 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 92, largest 3%]
+[  656.7s]   BN — medium tonic (n=105, rate 30 Hz, CV 0.00)
+[  656.7s]   BO — medium tonic (n=105, rate 46 Hz, CV 0.00) [UNSTABLE]
+[  656.7s]   BP — medium tonic (n=105, rate 26 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 84, largest 4%]
+[  656.7s]   BQ — slow tonic (n=103, rate 12 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 81, largest 4%]
+[  656.7s]   BR — fast tonic (n=101, rate 170 Hz, CV 0.00) [MULTIMODAL 2 comp >=5% of 60, largest 8%]
+[  656.7s]   BS — medium tonic (n=101, rate 52 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 0 comp >=5% of 72, largest 5%]
+[  656.7s]   BT — medium tonic (n=100, rate 30 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 85, largest 4%]
+[  656.7s]   BU — slow tonic (n=99, rate 16 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 75, largest 4%]
+[  656.7s]   BV — fast tonic (n=99, rate 80 Hz, CV 0.00)
+[  656.7s]   BW — slow tonic [mixed: 25% bursting] (n=96, rate 8 Hz, CV 0.00) [MULTIMODAL 2 comp >=5% of 73, largest 6%]
+[  656.7s]   BY — fast tonic (n=94, rate 138 Hz, CV 0.00)
+[  656.7s]   CA — fast tonic, +accelerating, +irregular (n=94, rate 195 Hz, CV 0.61) [UNSTABLE] [MULTIMODAL 2 comp >=5% of 34, largest 24%]
+[  656.7s]   CB — fast tonic (n=94, rate 130 Hz, CV 0.00)
+[  656.7s]   CC — medium tonic [mixed: 21% bursting] (n=94, rate 42 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 81, largest 4%]
+[  656.7s]   CD — fast tonic (n=93, rate 87 Hz, CV 0.00)
+[  656.7s]   CE — fast tonic (n=89, rate 164 Hz, CV 0.00) [UNSTABLE]
+[  656.7s]   CF — slow tonic (n=88, rate 16 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 63, largest 3%]
+[  656.7s]   CG — medium tonic (n=88, rate 26 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 73, largest 5%]
+[  656.7s]   CH — medium tonic (n=87, rate 28 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 76, largest 3%]
+[  656.7s]   CI — fast tonic (n=87, rate 240 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 63, largest 5%]
+[  656.7s]   CJ — medium tonic (n=84, rate 43 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 0 comp >=5% of 63, largest 5%]
+[  656.7s]   CK — fast tonic (n=81, rate 102 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 60, largest 5%]
+[  656.7s]   CL — slow bursting (2.7 spikes/burst, 2 Hz interburst), +accelerating (n=81, rate 6 Hz, CV 1.21)
+[  656.7s]   CM — medium tonic (n=79, rate 54 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 67, largest 3%]
+[  656.7s]   CN — slow tonic (n=79, rate 8 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 2 comp >=5% of 56, largest 5%]
+[  656.7s]   CO — slow tonic [mixed: 22% bursting] (n=78, rate 14 Hz, CV 0.00)
+[  656.7s]   CP — medium tonic (n=75, rate 39 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 0 comp >=5% of 67, largest 4%]
+[  656.7s]   CQ — fast tonic (n=74, rate 98 Hz, CV 0.00) [UNSTABLE]
+[  656.7s]   CR — very slow tonic (n=74, rate 2 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 3 comp >=5% of 27, largest 38%] [BELOW-RATE-FLOOR]
+[  656.7s]   CS — medium tonic (n=73, rate 44 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 65, largest 3%]
+[  656.7s]   CT — fast tonic (n=72, rate 117 Hz, CV 0.00) [UNSTABLE]
+[  656.7s]   CU — medium tonic (n=72, rate 24 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 0 comp >=5% of 62, largest 4%]
+[  656.7s]   CV — fast tonic (n=70, rate 90 Hz, CV 0.00) [UNSTABLE]
+[  656.7s]   CW — medium tonic (n=69, rate 36 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 0 comp >=5% of 59, largest 4%]
+[  656.7s]   CY — medium tonic (n=68, rate 48 Hz, CV 0.00)
+[  656.7s]   DA — medium tonic (n=65, rate 66 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 0 comp >=5% of 57, largest 5%]
+[  656.7s]   DB — medium tonic (n=64, rate 37 Hz, CV 0.00) [MULTIMODAL 0 comp >=5% of 55, largest 5%]
+[  656.7s]   DC — slow tonic (n=62, rate 10 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 0 comp >=5% of 54, largest 3%]
+[  656.7s]   DD — medium tonic (n=62, rate 23 Hz, CV 0.00) [UNSTABLE]
+[  656.7s]   DE — medium tonic (n=60, rate 24 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 2 comp >=5% of 49, largest 5%]
+[  656.7s]   DF — fast tonic (n=60, rate 123 Hz, CV 0.00) [UNSTABLE] [MULTIMODAL 2 comp >=5% of 47, largest 7%]
+[  663.3s] re-simulated 306 representatives with the output filter disabled
+[  798.6s] figures written to /opt/neuron/output
+[  799.0s]   wrote samples.csv (26624 x 36)
+[  799.3s]   wrote features_bands.csv: 26624 rows, 0.01 GiB, 0.3s (36 MB/s)
+[  858.6s]   wrote traces.csv: 26624 rows, 3.41 GiB, 59.3s (59 MB/s)
+[  898.2s]   wrote spectra_full.csv: 26624 rows, 2.45 GiB, 39.7s (63 MB/s)
+[  911.0s]   wrote 306 representative trace CSVs
+[  911.3s]   wrote cluster_stats.csv, corr_*.csv, run_data.npz, sweep_table.csv
+[  913.9s]   round trip over 572 clustered rows: max rel L2 7.23e-03, mean 7.86e-05 (452 quarantined/zero-feature rows excluded, max there 1.00e+30)
+[  914.0s]   wrote cluster_report.md
+[  914.0s]   wrote run_manifest.json
+[  919.7s]   wrote cluster_report.md
+[  919.7s]   wrote run_manifest.json
+[  919.7s] acceptance: 9/9 applicable criteria pass
+[  919.7s] total runtime 15.2 min

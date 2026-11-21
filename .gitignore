@@ -1,6 +1,6 @@
 # Generated pipeline artifacts (all regenerable from src/)
 /data/
-/output/
+#/output/
 
 # pixi environment
 /.pixi
