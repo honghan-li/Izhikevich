@@ -1,0 +1,1788 @@
+❯ Objective: Write a GPU-accerlerated python program that numerically simulates 
+  the Izhikevich model of a spiking neuron to identify as many clusters of      
+  interest as possible                                                          
+                                                                                
+  Information: The paper is available in @spikes.pdf . We will be varying       
+  a,b,c,d, and I. We will be holding I as a constant. Use pixi to set up the    
+  python project                                                                
+                                                                                
+  Workflow:                                                                     
+  - Sample n sets of coefficients. Use latin hypercube for the first iteration  
+  but use a Gaussian Process sampler for all iterations after to maximize       
+  information gathered from parameter space                                     
+  - Run dormand prince method to similate the PDE                               
+  - Run the DFFT on the solution, truncate away the symmetric part and take the 
+  magnitude                                                                     
+  - Repeat workflow m times                                                     
+                                                                                
+  Output:                                                                       
+  - Run UMAP and HDBSCAN to dimension reduce the DFFT bins and cluster them     
+  into a lower dimensional space                                                
+  - Print the mean and correlation matrix of the coefficient vector for each    
+  cluster. I would like the correlation matrix to display the correlation       
+  between the coefficients on the lower triangular part, the SD on the diagonal 
+  part, and remove the upper triangular part for ease of reading                
+  - Use UMAP to reduce the space into 2D and use matplotlib to create a         
+  scatterplot of the clusters. Label them as A, B, C, etc. Display a graph      
+  popup and save this image to /output                                          
+  - Display the 3 neuron activation patterns closest to the mean for each       
+  cluster on a graph and create a new graph for the magnitude plot of each of   
+  their fourier bins (with frequencies labelled). Name the files like A1.png,   
+  B1.png, etc.                                                                  
+                                                                                
+  Tasks:                                                                        
+  - Do not code it first. Create a specification detailing the parameters for   
+  each step, such as choosing values for n, m, and dormand prince that would    
+  allow for as much accuracy as possible without taking too much time on this   
+  device.                                                                       
+  - How many dimensions should be reduced using UMAP before running HDBSCAN?    
+  What should their parameters be set to?                                       
+  - For dormand prince, how long should the simulation be ran such that there   
+  is a reasonable amount of spikes for the clustering to be accurate?           
+  - Are there any suggestions you would give to this workflow which I missed    
+  that can better reach the objective?                                          
+                                                                                
+  ⎿  Read spikes.pdf (403.6KB)
+
+● Skill(superpowers:brainstorming)
+  ⎿  Successfully loaded skill
+
+● I'll classify this as architectural — new project, multiple subsystems
+  (sampling, integration, spectral features, clustering, reporting). Let me
+  explore context first.
+
+  Read 1 file, ran 8 shell commands (ctrl+o to expand)
+
+● I've read the paper (Izhikevich 2003, IEEE TNN 14(6):1569) and probed the
+  machine. Let me write back my understanding before proposing anything.
+
+  Understanding
+
+  What you said:
+  - Vary a, b, c, d; hold I fixed. Sample → integrate with Dormand–Prince → rFFT
+  → magnitude → repeat m times, with LHS on iteration 1 and a GP-driven sampler
+  after.
+  - Cluster the spectra via UMAP + HDBSCAN; report per-cluster coefficient means
+  and a lower-triangle correlation matrix with SDs on the diagonal; 2D UMAP
+  scatter labelled A, B, C…; 3 representative traces + spectra per cluster.
+  - Spec only, no code yet. pixi for the environment.
+
+  What I found:
+  - The model is a 2-D ODE with a hard reset event (v≥30 → v←c, u←u+d), not a
+  PDE. That discontinuity — not the smooth part — is the dominant source of
+  numerical error, and it also means DP5's adaptive step controller is
+  meaningless on spike steps. This drives most of the integrator design.
+  - Hardware: RTX 500 Ada Laptop, 4094 MiB VRAM, compute capability 8.9; 22 CPU
+  threads, 62 GB RAM, DISPLAY=:0 present (so plt.show() popups will work). cupy
+  and umap-learn are both on conda-forge.
+  - /output does not exist and cannot be created without root. I'll default to
+  /opt/neuron/output with a --outdir flag; you can sudo mkdir -p /output && sudo
+  chown $USER /output if you want the literal path.
+  - Cost asymmetry: the integration is nearly free on this GPU (~10⁸
+  flops/sample → a couple of seconds for a few thousand samples in one fused
+  kernel). The real time sink is UMAP + HDBSCAN on CPU. So the budget should be
+  spent on more samples and longer traces, not on a finer timestep — and total
+  sample count n·m should be sized by what UMAP can chew, not by the GPU.
+  - Useful analytic anchor for range selection: with u=bv, equilibria solve
+  0.04v² + (5−b)v + (140+I) = 0. At I=10 the discriminant vanishes at b ≈ 0.101.
+  So for b > 0.101 there is no fixed point and the neuron fires tonically no
+  matter what; for b < 0.101 a rest state exists (quiescence, bistability,
+  subthreshold resonance). Any sampling box should straddle 0.101 or you lose
+  half the phenomenology.
+
+  Assumptions I'm making (correct me): I = 10 (the paper's Fig. 2 value, so
+  results are directly comparable to RS/IB/CH/FS/LTS/TC/RZ); initial condition
+  v₀ = −70, u₀ = b·v₀ with I applied as a step at t=0; "clusters of interest"
+  means distinguishable firing-pattern types, and naming them against the
+  paper's known types is part of success.
+
+  Two things genuinely change the design, so I'd rather ask than guess:
+
+● User answered Claude's questions:
+  ⎿  · What wall-clock budget should one full end-to-end run fit into? (This 
+     sets n, m, trace length, and how big a hyperparameter sweep I can afford.) 
+     → ~45 min (Recommended)
+     · Does this sampling box for the coefficients look right? It covers every 
+     type in the paper plus margin, and straddles the b≈0.101 bifurcation. → Use
+     proposed box (Recommended)
+
+● Locked: ~45 min budget, proposed sampling box, I=10.
+
+  Approaches
+
+  The one real architectural fork is the GPU stack, because it determines
+  whether the integrator is a fused kernel or a sequence of array ops, and what
+  the GP sampler is built on.
+
+  A — CuPy fused RawKernel + hand-rolled GP in CuPy (my recommendation)
+  One thread per parameter set; the entire 250k-step DP5 loop lives inside one
+  CUDA C kernel with v, u in registers, writing only every 10th step to a
+  coalesced [n_out, n_batch] buffer. Spectra via cupyx.scipy.fft.rfft. The GP is
+  ~80 lines: ARD-RBF kernel, Cholesky, analytic log-marginal-likelihood
+  gradients, L-BFGS-B over 6 log-hyperparameters. With N_gp capped at 3000, a
+  Cholesky is ~10 ms on this GPU, so a full hyperparameter fit is seconds.
+  Pro: fastest by a wide margin (zero kernel-launch overhead over 250k steps),
+  smallest environment (~800 MB, no PyTorch), one framework, trivially fits 4 GB
+  VRAM. Con: you own ~120 lines of CUDA C and ~80 lines of GP math.
+
+  B — PyTorch vectorised integrator + GPyTorch
+  DP5 as batched tensor ops; GP from a maintained library. Pro: no CUDA C, no GP
+  math, autodiff for free. Con: ~50 kernel launches × 250k steps ≈ 12M launches
+  ≈ 100 s of pure launch overhead per batch unless wrapped in CUDA graphs; adds
+  ~3 GB to the environment; batched ARD GPs at N=3000 × 6 outputs is ~290 MB of
+  VRAM on a 4 GB card alongside the sim buffers.
+
+  C — JAX lax.scan + jit
+  Elegant, fuses the loop properly, autodiff for the GP. Con: JAX+CUDA via
+  conda-forge is the most fragile of the three, and XLA's default 75% VRAM
+  preallocation needs disabling on a 4 GB card. Least predictable to get working
+  on this machine.
+
+  I recommend A. The sim is the one part that must be fast and it's the part
+  where a fused kernel wins outright; the GP is small enough that a library is
+  not worth 3 GB and a second framework.
+
+  The second choice is what actually goes into the feature vector. Your workflow
+  says "rFFT, truncate the symmetric part, take the magnitude" — I want to
+  confirm how literally to read that, because unconditioned magnitudes will
+  cluster badly:
+
+● User answered Claude's questions:
+  ⎿  · Which GPU/compute stack? → A — CuPy fused kernel (Recommended)
+     · How should the rFFT magnitudes be conditioned before UMAP? → Conditioned 
+     pipeline (Recommended)
+
+● Design, in sections. I've batched them rather than making you nod six times —
+  flag any section you want changed and I'll revise before writing the spec
+  file.
+
+  ---
+  1. Time grid and why
+
+  ┌─────────────┬─────────────┬────────────────────────────────────────────┐
+  │  Quantity   │    Value    │                   Reason                   │
+  ├─────────────┼─────────────┼────────────────────────────────────────────┤
+  │ T_total     │ 2500 ms     │ —                                          │
+  ├─────────────┼─────────────┼────────────────────────────────────────────┤
+  │ transient   │ [0, 500) ms │ 2.5× the slowest model timescale (1/a_min  │
+  │ discard     │             │ = 200 ms)                                  │
+  ├─────────────┼─────────────┼────────────────────────────────────────────┤
+  │ analysis    │ [500, 2500) │                                            │
+  │ window      │  ms = 2000  │ —                                          │
+  │             │ ms          │                                            │
+  ├─────────────┼─────────────┼────────────────────────────────────────────┤
+  │ dt_out      │ 0.1 ms      │ matches the paper's Fig. 2 resolution;     │
+  │             │             │ f_Nyq = 5000 Hz                            │
+  ├─────────────┼─────────────┼────────────────────────────────────────────┤
+  │ N_out       │ 20 000      │ Δf = 1/2.0 s = 0.5 Hz                      │
+  │ (window)    │ samples     │                                            │
+  ├─────────────┼─────────────┼────────────────────────────────────────────┤
+  │             │             │ exactly 10 integration steps per output    │
+  │ dt_int      │ 0.01 ms     │ sample → outputs land on grid points, no   │
+  │             │             │ dense-output interpolation needed          │
+  ├─────────────┼─────────────┼────────────────────────────────────────────┤
+  │ total steps │ 250 000     │ —                                          │
+  └─────────────┴─────────────┴────────────────────────────────────────────┘
+
+  Answering "how long for a reasonable number of spikes": the binding constraint
+  is the slowest rhythm, not the fastest. Burst envelopes are built from u
+  accumulating on the 1/a timescale, so at a=0.005 the interburst period can
+  reach several hundred ms. A 2000 ms window gives ≥8 cycles at 4 Hz, ≥20 at 10
+  Hz, hundreds at FS rates, and 2–4 cycles at the very slowest corner.
+  Spike-count floor for a meaningful spectrum is ~8 spikes, which at 2000 ms is
+  a 4 Hz firing-rate floor — anything below that is quarantined rather than
+  clustered.
+
+  2. Integrator
+
+  Fixed-step DP5 (DOPRI5 tableau, 5th-order solution, FSAL → 6 RHS evals/step).
+  Fixed, not adaptive, deliberately: the embedded 4(5) error estimate is
+  meaningless on a step containing a reset, since the step has an O(1) jump — a
+  step controller would either reject forever or need explicit event location.
+  Fixed step with event-at-step-end is the honest SIMD choice.
+
+  Error budget: DP5 truncation on the smooth flow is negligible (|dv/dt| ≤ 330 
+  mV/ms at the threshold, error O(dt⁶)). The binding error is spike-time 
+  quantisation from the reset, bounded by dt_int = 0.01 ms. At 1000 Hz (top of
+  the analysis band) that's a 3.6° phase error; at 100 Hz, 0.36°. In-band
+  magnitude error < 0.2%.
+
+  - Peak equalisation: on trigger, the sample is recorded as exactly +30.0
+  before resetting v←c, u←u+d — the same thing the paper does in Fig. 3. Without
+  it, the overshoot (a step can end at up to ~33 mV) injects
+  parameter-dependent amplitude noise straight into the high bins.
+  - Per-sample adaptivity, not per-step: the embedded 4th-order estimate is
+  computed on non-spike steps and reduced to a per-sample max local error. Any
+  sample exceeding 1e-6, or going non-finite, is re-run at dt/4 in a second
+  pass. That's the right way to get adaptivity on SIMD hardware.
+  - Convergence gate (hard, runs before the sweep): 24 probe vectors (the
+  paper's 7 types + 17 LHS points) at dt ∈ {0.04, 0.02, 0.01, 0.005, 0.0025, 
+  0.001}; accept 0.01 only if the 128-band feature vector is within 1% relative
+  L2 of the dt=0.001 reference. Takes seconds. I'd rather gate than assert.
+
+  Kernel layout: one thread per parameter set, 256 threads/block, v,u and all
+  parameters in registers for the whole 250k-step loop. Output written as
+  traces[t * n_batch + i] so consecutive threads write consecutive addresses —
+  fully coalesced. Chunk = 2048 → 164 MB trace buffer, ~500 MB peak with cuFFT
+  workspace, comfortable in 4094 MiB. At 2048 threads on 2048 cores there's no
+  latency hiding, so expect ~5–10% of peak FP32 → roughly 1–3 s per chunk. Not
+  worth optimising; the sim is not the bottleneck.
+
+  The kernel also accumulates, in registers: spike count, ISI sum/sumsq/min/max,
+  burst index, adaptation index, mean/SD of v, max local error, finite flag.
+  These are not clustering features — they're what lets us name the clusters
+  afterwards.
+
+  3. Feature vector
+
+  Mean-subtract → Hann → rfft → |·| → band-limit to 1000 Hz → 128 bands → log1p
+  → L2-normalise.
+
+  One correction to what I showed you earlier: pure log-spacing from 0.5 Hz
+  breaks, because a 6.1%-wide band at 0.5 Hz is 0.03 Hz — far narrower than Δf =
+  0.5 Hz, leaving ~40 empty bands. So the banding is hybrid: 40 native 0.5 Hz
+  bins covering 0.5–20 Hz, then 88 log-spaced bands (4.55%/band) covering
+  20–1000 Hz, where band width ≥ Δf holds throughout. Each band value is the RMS
+  magnitude over its bins, so wide bands don't win just by containing more of
+  them.
+
+  4. Sample counts — answering n and m
+
+  - iteration 1: n₁ = 4096, scrambled LHS (optimization='random-cd'), plus the 
+  paper's 7 canonical vectors injected as seeds so the known types are
+  guaranteed present.
+  - iterations 2–12: n = 2048 each, split 70% GP-acquisition / 30% fresh LHS.
+  - m = 12, total N = 26 624.
+
+  m=12 because the GP needs enough rounds for the ARD lengthscales to sharpen
+  (below ~8 it barely adapts) while per-round overhead stays affordable. The 30%
+  LHS floor is not padding — max-variance acquisition reliably collapses into
+  one region once lengthscales go anisotropic, and the floor keeps the design
+  globally ergodic so a cluster in an unvisited corner can still be found.
+
+  5. GP sampler
+
+  Unit hypercube (a via log then min-max). Outputs = first 6 PCA components of
+  the feature matrix, each standardised. Six independent ARD-RBF GPs + constant
+  mean + Gaussian noise, hyperparameters by L-BFGS-B on the log-marginal
+  likelihood with analytic gradients. Training cap N_gp = 3000, composed as all
+  points from the last two iterations plus a uniform draw from earlier, so
+  recent structure is never diluted.
+
+  One mechanism worth stating explicitly, because it's the easiest thing to get
+  wrong: GP posterior variance does not depend on the observed y for a fixed 
+  kernel. Max-variance acquisition would therefore degenerate into a plain
+  space-filling design. It becomes informative only because the ARD lengthscales
+  are learned — directions and regions where the spectra change fast get short
+  lengthscales and hence high variance. ARD (not isotropic) is mandatory, and
+  two y-dependent terms are added:
+
+  Pool of 20 000 scrambled-Sobol candidates, each term rank-normalised:
+  - 0.40 × total posterior SD, weighted by PC explained variance → explore
+  - 0.30 × ‖∇ₓ μ(x)‖ (analytic for RBF) → seek bifurcation surfaces, where
+  behaviour changes fastest
+  - 0.30 × predictive entropy of a 25-NN classifier on current HDBSCAN labels →
+  seek type boundaries and unlabelled voids
+
+  Batch picked greedily, re-conditioning posterior variance after each pick
+  (exact and y-free via rank-1 Cholesky update) — that's what supplies the
+  repulsion that stops the batch clumping on one maximum. The per-iteration
+  interim clustering that feeds the entropy term is cheap: PCA(50) → HDBSCAN on
+  an 8000-point subsample, no UMAP. Full UMAP runs once, at the end.
+
+  6. UMAP and HDBSCAN — answering the dimension question
+
+  Two separate UMAP fits, and they must not be the same one.
+
+  Clustering embedding: n_components = 10.
+  - Not the 2D viz embedding: 2D UMAP aggressively distorts local density to fit
+  the plane. HDBSCAN is a density algorithm, so clustering there both fragments
+  real clusters and fuses adjacent ones. Cluster in 10D, colour the 2D plot
+  with those labels.
+  - Not 2–5: UMAP has to tear the topology to embed that low, merging types.
+  - Not 20–50: HDBSCAN's mutual-reachability distance degrades as the k-NN
+  distance distribution concentrates; density contrast collapses above ~15–20
+  dims.
+  - n_neighbors=30, min_dist=0.0, metric='euclidean', n_epochs=500, 
+  random_state=42.
+    - min_dist=0.0 specifically because this embedding feeds a density clusterer
+  — it lets points pack arbitrarily tightly, maximising density contrast.
+  min_dist is otherwise a purely cosmetic parameter.
+    - n_neighbors=30: at N≈27k with 10–40 expected clusters (~700–2700 pts
+  each), 30 balances local detail against global structure; 15 over-fragments,
+  100 washes out small clusters.
+    - euclidean on L2-normalised features is monotone-equivalent to cosine, so
+  it yields an identical k-NN graph and is faster.
+  - PCA(50) before UMAP — retains >99% of the 128 bands' variance, denoises, ~3×
+  faster k-NN, and the same basis is reused by the GP sampler.
+
+  Visualisation embedding: n_components=2, n_neighbors=30, min_dist=0.1, fitted
+  independently on the same PCA(50) input, coloured by the 10D labels.
+
+  HDBSCAN: min_cluster_size=60 (≈0.22% of N), min_samples=10,
+  cluster_selection_method='leaf', prediction_data=True,
+  allow_single_cluster=False.
+  - min_samples=10 is the key knob — the library default (= min_cluster_size) is
+  far too conservative and will label a large fraction as noise while
+  swallowing small clusters.
+  - 'leaf' is what serves your objective directly. The default 'eom' (excess of
+  mass) prefers few large stable clusters and absorbs fine structure; 'leaf'
+  returns the finest leaves of the condensed tree. Report both — leaf as the
+  fine taxonomy (A, B, C…), eom as a coarse grouping, plus the leaf→eom
+  containment table.
+  - Sweep: n_neighbors ∈ {15,30,50} × min_cluster_size ∈ {30,60,120} ×
+  min_samples ∈ {5,10,25} × method ∈ {leaf,eom} = 54 configs, but UMAP refits
+  only 3× (once per n_neighbors). Scored by relative_validity_ (DBCV) with a
+  penalty for noise fraction > 25%.
+
+  Quarantine before UMAP: truly-at-rest samples (no spike and in-band AC power
+  below a floor) would form one enormous degenerate blob that distorts the whole
+  k-NN graph. Hold them out as cluster Z and report their parameter region
+  separately. Critically, do not drop all zero-spike samples — subthreshold
+  resonators (RZ) have zero spikes but a real spectral peak, and the AC-power
+  floor is exactly what separates the two. Expect this to matter, since b < 
+  0.101 is inside the box.
+
+  7. Budget check (~40 min)
+
+  convergence gate 1 · 12 iterations × ~45 s = 9 · final PCA + 3 UMAP fits 8 ·
+  54 HDBSCAN configs 13 · 2D UMAP 2 · 5-seed stability on a 12k subsample 6 →
+  ~39 min.
+
+  8. Outputs
+
+  /opt/neuron/output/ (--outdir; /output needs root, see above).
+
+  - clusters_umap2d.png — labelled A, B, C…; noise light grey; Z separate; the 
+  paper's 7 canonical types overlaid as annotated markers via
+  approximate_predict. plt.show() popup + 200 dpi savefig.
+  - cluster_stats.md / .csv + stdout — per cluster: mean coefficient vector,
+  then the triangular matrix (lower = Pearson r, diagonal = SD, upper blank via
+  to_string(na_rep='')).
+  - A1.png … A3.png — representatives chosen by distance to the cluster centroid
+  in the 10D clustering embedding (tie-break on HDBSCAN membership
+  probability), each a 2-panel figure: v(t) over the full 2500 ms with the
+  analysis window shaded, and |rFFT| vs frequency (linear 0–500 Hz, log-f inset,
+  peaks annotated in Hz). Plus A_traces.png stacking all three. Flagging this:
+  your wording could also mean strictly separate trace and spectrum files — say
+  if you'd prefer A1_trace.png / A1_fft.png.
+  - run_manifest.json (every parameter, seeds, timings, versions) and
+  run_data.npz (coefficients, features, diagnostics, embeddings, labels), so
+  clustering can be re-explored without re-simulating.
+  - Traces are never persisted — 27k × 25k × 4 B = 2.7 GB. The integrator is
+  deterministic, so the ~100 representatives are re-simulated exactly, in under
+  a second.
+
+  ---
+  9. Suggestions you didn't ask for — answering your last question
+
+  Ordered by how much they advance "identify as many clusters of interest as
+  possible".
+
+  1. Validate against the paper's known types. Push RS/IB/CH/FS/LTS/TC/RZ
+  through approximate_predict and report which cluster each lands in. This
+  converts "we found 23 clusters" into "we recovered the 7 known types and found
+  16 more" — which is the actual objective, and it's the only external ground
+  truth available.
+  2. Name the clusters. Report the in-kernel diagnostics (firing rate, CV(ISI),
+  burst index, spikes-per-burst, adaptation index) per cluster so each gets a
+  label like "fast tonic, no adaptation" or "slow burster, 3 spikes/burst". A
+  cluster you can't characterise isn't "of interest" yet.
+  3. Your correlation matrices will be biased, and this is the one real defect 
+  in the workflow as stated. The GP sampler deliberately oversamples boundaries
+  and fast-changing regions, so within-cluster coefficient correlations partly
+  measure your sampling design rather than the cluster. Fix: report each matrix
+  twice — once on all samples, once on the LHS-only subset (4096 + 11×614 = 10
+  850 design-unbiased points) — and treat the LHS-only version as authoritative.
+  (Alternative: inverse-propensity weighting by a k-NN density estimate in
+  parameter space.)
+  4. Check whether each cluster is contiguous in parameter space. Run
+  single-linkage on each cluster's own (a,b,c,d) points and report the component
+  count. A cluster that is fragmented across parameter space means its mean 
+  coefficient vector is meaningless — and the mean is something you're printing.
+  Flag those clusters explicitly rather than reporting a mean between two
+  modes.
+  5. Score cluster stability. Re-run the chosen config under 5 UMAP seeds and
+  report pairwise ARI, plus per-cluster persistence. An unstable cluster is an
+  artefact, not a finding.
+  6. Known blind spot from holding I constant. Two behaviours in the paper are
+  protocol-dependent, not parameter-dependent: TC rebound bursting needs a
+  hyperpolarising step, and the RZ resting/spiking bistability needs timed brief
+  stimuli. Neither can appear under a single constant I, no matter how you
+  sample a,b,c,d. Cheap fix if you want them: run the pipeline as 2–3 sheets at
+  I ∈ {2, 10, 20}, or prepend a brief hyperpolarising pre-pulse. I'd keep I=10
+  for v1 and note the gap.
+  7. Add a stationarity index (spectrum of the window's first half vs second
+  half). The 500 ms discard won't settle every slow corner, and slowly-drifting
+  samples are both a QC flag and potentially interesting in their own right.
+  8. Minor: the model is a 2-D ODE with a reset event, not a PDE — worth getting
+  right in the write-up, since the reset discontinuity is precisely what makes
+  the numerics non-trivial.
+  9. Optional: a complementary feature block from the spike-train spectrum
+  (delta train) rather than the voltage trace. The v(t) spectrum mixes rhythm
+  with spike waveform; the spike train isolates rhythm alone. Would roughly
+  double feature-construction code for a probable gain in rhythm-based cluster
+  separation.
+
+  ---
+  Shall I write this up to
+  docs/superpowers/specs/2026-11-21-izhikevich-cluster-discovery-design.md? And
+  two small things to confirm: which of suggestions 1–9 to fold into v1 (I'd
+  take 1–5, 7, 8 as in-scope and leave 6 and 9 as documented extensions), and
+  whether you want the representative figures combined (A1.png) or split
+  (A1_trace.png / A1_fft.png).
+
+✻ Crunched for 9m 55s
+
+❯ Should discrete integration be applied before the DFFT?                       
+
+● Two readings of that, and they land differently. Let me take both.
+
+  Reading A — cumulative integration (cumsum/trapezoid of v) before the rFFT
+
+  No. But the thing it would buy you is worth having, applied elsewhere.
+
+  Time-domain integration is exactly a 1/f spectral weighting. The motivation is
+  sound: v(t)'s spectrum is dominated by the spike waveform's broadband
+  harmonic comb, and a 1/f tilt suppresses the high harmonics and emphasises the
+  slow burst envelope — pushing the features toward rhythm and away from
+  waveform. That's a genuinely different metric from what I specified, because
+  log-banding changes bin widths, log1p compresses amplitude, and L2 normalises
+  scale — none of them apply a frequency-dependent tilt.
+
+  But doing it by integrating in the time domain is the worse way to get it:
+
+  - A cumsum has infinite DC gain, so any residual mean or slow drift becomes a
+  ramp that swamps the low bins. We mean-subtract, but the non-stationarity I
+  flagged in §9.7 (slow corners not settled by 500 ms) gets amplified by exactly
+  the 1/f factor — the worst possible interaction.
+  - Integrating before windowing means the Hann window then applies to a signal
+  whose endpoints no longer match, reintroducing leakage.
+  - It's a fixed, unparameterised tilt. You can't dial it.
+
+  Post-FFT weighting gets the same effect exactly, with none of that: |X(f)| → 
+  |X(f)| · (f₀/f)^α. So I'd add --spectral-tilt α with α ∈ {0, 0.5, 1}, default
+  0, and sweep it as part of the clustering selection — it's one cheap axis and
+  it may well separate burst rhythms better. Note α=1 on log-spaced bands is a
+  linear reweighting in log-f, so it's a real change to the UMAP metric, not a
+  cosmetic one.
+
+  Reading B — integrating over each output interval instead of point-sampling
+
+  Yes, and this is a gap in §1–2 as I wrote them. I specified decimation 10:1
+  (dt_int=0.01 ms → dt_out=0.1 ms) by taking every 10th step, with no anti-alias
+  filter. That's wrong, and here it's not a rounding-error concern.
+
+  The reset is a true step discontinuity (v: +30 → c), so the signal is not 
+  bandlimited at any sample rate — its harmonics fall only as 1/f. Decimating to
+  10 kHz means the 0–1000 Hz band receives folded energy from 9–11 kHz (and
+  19–21, …). Putting numbers on it, for a 100 Hz firing rate:
+
+  ┌──────────────────────────────────────┬────────────────────┐
+  │                                      │ relative amplitude │
+  ├──────────────────────────────────────┼────────────────────┤
+  │ legitimate content at 1000 Hz (k=10) │ −20 dB             │
+  ├──────────────────────────────────────┼────────────────────┤
+  │ folding content at 9.5 kHz (k=95)    │ −40 dB             │
+  └──────────────────────────────────────┴────────────────────┘
+
+  So unfiltered, aliasing sits only ~20 dB under the legitimate signal at the
+  top of the analysis band — a ~10% amplitude error in the upper bands. Worse
+  than the size: the fold amount depends on where the firing rate sits relative
+  to 10 kHz, so it's a non-smooth, parameter-dependent perturbation. That's
+  corrosive twice over — it adds noise to the UMAP metric, and it violates the
+  smooth-response-surface assumption the GP sampler is built on.
+
+  The fix is cheap, and it is precisely "discrete integration before the DFFT":
+  emit the mean of the 10 sub-steps rather than the 10th sub-step. That's a
+  boxcar decimation filter, and boxcars have nulls exactly at multiples of the
+  output rate — which is exactly where the troublesome images live:
+
+  ┌────────────────────────────┬───────────────┬─────────────┐
+  │                            │ single boxcar │ cascaded ×2 │
+  ├────────────────────────────┼───────────────┼─────────────┤
+  │ 9 kHz (worst of fold band) │ −19 dB        │ −38 dB      │
+  ├────────────────────────────┼───────────────┼─────────────┤
+  │ 10 kHz (image centre)      │ null          │ null        │
+  ├────────────────────────────┼───────────────┼─────────────┤
+  │ 1 kHz (in-band distortion) │ −0.14 dB      │ −0.28 dB    │
+  └────────────────────────────┴───────────────┴─────────────┘
+
+  A single boxcar already gives ~38 dB of margin (≈1% error); cascading twice
+  gives ~58 dB (≈0.1%), at roughly two extra FMAs per integration step inside
+  the kernel — free. So: cascade ×2.
+
+  And because the filter is a known linear operator, the small in-band tilt is
+  removed exactly by dividing the magnitude spectrum by |H(f)|² with H(f) = 
+  sin(πfLT)/(L·sin(πfT)), L=10, T=0.01 ms. Residual error is then aliasing
+  alone, ~0.1%. Note the tilt is identical for every parameter set, so even
+  uncorrected it would be harmless to clustering — but it costs one line to be
+  exact.
+
+  One consequence worth stating: the cascaded filter is 19 samples ≈ 0.19 ms
+  long, comparable to the ~0.15 ms spike upstroke, so it visibly rounds the
+  spikes. That's fine for the 0–1000 Hz features but would look wrong in the
+  A1.png trace panels. The re-simulate-representatives design in §8 already
+  solves this for free — emit representative traces at full dt_int with the
+  filter off, so the displayed spikes stay sharp while the clustered spectra
+  stay anti-aliased.
+
+  Spec deltas
+
+  - §2 gains: output stage = cascaded-boxcar (×2, L=10) accumulator in
+  registers, emitting at dt_out; representatives re-simulated with filtering
+  disabled.
+  - §3 gains: divide |X(f)| by |H(f)|² before banding; new --spectral-tilt α ∈ 
+  {0, 0.5, 1} applied post-FFT, default 0, added to the selection sweep.
+  - §2 convergence gate gains a second check: verify the 128-band vector is
+  stable when dt_out is halved to 0.05 ms, which is the direct empirical test
+  that aliasing is controlled. If it isn't, the answer is a longer cascade, not
+  a smaller dt_int.
+
+  Good catch — the 1/f discontinuity tail is the one place where this model
+  punishes naive decimation, and it's invisible until you notice the reset is a
+  genuine jump rather than a steep smooth rise.
+
+  Want me to write the spec now with these folded in?
+
+✻ Sautéed for 2m 8s
+
+❯ When the calculations are done, also create the folder /data the current      
+  directory and store the simulation results + dfft output as CSVs. write the   
+  spec in the current directory and implement suggestion 1, 2, 3, 4, 5, 8       
+
+● Understood. Three things, and one of them needs an arithmetic reality check
+  before I write it down.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● cupy 14.2's default build wants cuda-version >=13,<14 — and this machine's
+  driver is CUDA 13.2, so that matches exactly with no forward-compat games. All
+  other packages resolve on conda-forge. Now the reality check on CSVs:
+
+  ┌────────────────────────────────────┬───────────────┬────────────────────┐
+  │              Artefact              │    As CSV     │      Verdict       │
+  ├────────────────────────────────────┼───────────────┼────────────────────┤
+  │ Full traces, 26 624 × 20 000       │ ~4.8 TB       │ impossible (644 GB │
+  │                                    │               │  free)             │
+  ├────────────────────────────────────┼───────────────┼────────────────────┤
+  │ Full one-sided spectra, 26 624 ×   │ ~2.4 TB       │ impossible         │
+  │ 10 001                             │               │                    │
+  ├────────────────────────────────────┼───────────────┼────────────────────┤
+  │ Band-limited spectra, 26 624 × 2   │ ~479 MB (~96  │ fine               │
+  │ 000 (≤1 kHz)                       │ MB .gz)       │                    │
+  ├────────────────────────────────────┼───────────────┼────────────────────┤
+  │ 128-band features                  │ ~31 MB        │ fine               │
+  ├────────────────────────────────────┼───────────────┼────────────────────┤
+  │ Per-sample table (coeffs +         │ ~11 MB        │ fine               │
+  │ diagnostics + labels)              │               │                    │
+  ├────────────────────────────────────┼───────────────┼────────────────────┤
+  │ Representative traces only, ~90 ×  │ ~63 MB        │ fine               │
+  │ 25 000                             │               │                    │
+  └────────────────────────────────────┴───────────────┴────────────────────┘
+
+  So "simulation results as CSV" can't mean every trace — it's off by 7× the
+  disk. I've specified the largest set that is actually useful and writable: the
+  per-sample table, the 128-band features, the band-limited spectra (gzipped
+  CSV, still CSV-readable), and full traces for the representatives. If you do
+  want all 26 624 traces, the honest format is float16 .npy at 1.07 GB — in as
+  --dump-all-traces, off by default.
+
+  Writing the spec now.
+
+● API Error: Connection closed mid-response. The response above may be 
+  incomplete.
+
+✻ Sautéed for 4m 54s
+
+❯ continue                                                                      
+  Read 2 files (ctrl+o to expand)
+
+● Spec written (660 lines). Running the self-review now — placeholder scan,
+  internal consistency, ambiguity.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Found one real defect: I added alpha to the §12.3 sweep without recomputing —
+  that makes it 162 configs ≈ 40 min of HDBSCAN alone against the 13 min claimed
+  in §15. Fixing that plus four smaller items.
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(SPEC.md)
+  ⎿  Added 19 lines, removed 7 lines
+      435    `leaf` as the fine taxonomy (A, B, C, …), `eom` as a coarse 
+           grouping, plus the
+      436    leaf→eom containment table.
+      437  
+      438 -**Selection sweep:** `n_neighbors ∈ {15,30,50}` × `min_cluster
+          -_size ∈ {30,60,120}`                                          
+      439 -× `min_samples ∈ {5,10,25}` × method ∈ `{leaf,eom}` × `alpha ∈
+          - {0,0.5,1}`.                                                  
+      440 -UMAP refits only `3 × 3 = 9` times (once per `n_neighbors` × `
+          -alpha`); HDBSCAN is                                           
+      441 -~15 s per config. Scored by **`relative_validity_` (DBCV)** wi
+          -th a penalty for                                              
+      442 -noise fraction above 25%. The full sweep table is reported; th
+          -e best config                                                 
+      443 -drives the figures, with the hand-set defaults above as the re
+          -producible                                                    
+      444 -fallback and as the config reported if the sweep is skipped (`
+          ---no-sweep`).                                                 
+      438 +**Selection sweep, two staged passes.** A single full-factoria
+          +l sweep is not                                                
+      439 +affordable: `alpha` is a *feature-pipeline* parameter (§9 step
+          + 6), so changing it                                           
+      440 +invalidates the features, the PCA basis and every UMAP fit dow
+          +nstream — a                                                   
+      441 +`3 × 3 × 3 × 2 × 3 = 162`-config grid would cost ~40 min of HD
+          +BSCAN alone against                                           
+      442 +a ~47 min total budget. Staged instead:                       
+      443  
+      444 +- **Stage 1 — clustering parameters at `alpha = 0`:** `n_neigh
+          +bors ∈ {15,30,50}`                                            
+      445 +  × `min_cluster_size ∈ {30,60,120}` × `min_samples ∈ {5,10,25
+          +}` × method ∈                                                 
+      446 +  `{leaf,eom}` = **54 configs**. UMAP(10) refits only 3× (once
+          + per                                                          
+      447 +  `n_neighbors`); HDBSCAN is ~15 s per config → ~13.5 min.    
+      448 +- **Stage 2 — spectral tilt, holding stage 1's winner fixed:**
+          + `alpha ∈ {0.5, 1}`                                           
+      449 +  = **2 configs**, each requiring a features → PCA → UMAP(10) 
+          +→ HDBSCAN                                                     
+      450 +  re-run → ~6 min.                                            
+      451 +                                                              
+      452 +Scored by **`relative_validity_` (DBCV)** with a penalty for n
+          +oise fraction above                                           
+      453 +25%. Both stage tables are reported; the overall winner drives
+          + the figures, with                                            
+      454 +the hand-set defaults above as the reproducible fallback and a
+          +s the config                                                  
+      455 +reported when the sweep is skipped (`--no-sweep`). `--sweep-fa
+          +st` drops                                                     
+      456 +`min_samples = 25` from stage 1 (36 configs, ~9 min).         
+      457 +                                                              
+      458  **Cluster labelling:** clusters are sorted by descending size 
+           and assigned
+      459  `A, B, C, …` (then `AA, AB, …` beyond 26). `Z` is reserved for
+            quarantine (§10),
+      460  `X` for non-finite, and HDBSCAN noise (`-1`) is reported as `n
+           oise`, never
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(SPEC.md)
+  ⎿  Added 10 lines, removed 4 lines
+      559  
+      560  Example rendering: `C — fast tonic, +adapting (n=1842, rate 94
+            Hz, CV 0.08)`.
+      561  
+      562 -## 15. Runtime budget (~40 min, matching the agreed target)   
+      562 +## 15. Runtime budget (~47 min, against the agreed ~45 min tar
+          +get)                                                          
+      563  
+      564  | Stage | Time |
+      565  |---|---|
+      566  | Convergence gate (§7.4) | 1 min |
+      567  | 12 iterations × ~45 s (sim 3 s · rFFT 1 s · PCA 2 s · GP fit
+            10 s · acquisition 5 s · interim HDBSCAN 20 s) | 9 min |
+      568 -| Final PCA + 9 UMAP(10) fits at 27k (sweep) | 8 min |        
+      569 -| HDBSCAN sweep configs | 13 min |                            
+      568 +| Final PCA + 3 UMAP(10) fits at 27k (sweep stage 1) | 8 min |
+      569 +| HDBSCAN sweep stage 1, 54 configs | 13.5 min |              
+      570 +| Sweep stage 2, `alpha ∈ {0.5, 1}` (features → PCA → UMAP → H
+          +DBSCAN) | 6 min |                                             
+      571  | UMAP(2) visualisation fit | 2 min |
+      572  | 5-seed stability on 12k subsample (§13.2) | 6 min |
+      573  | Validation, stats, figures, CSV writing | 2 min |
+      573 -| **Total** | **~41 min** |                                   
+      574 +| **Total** | **~47 min** |                                   
+      575  
+      576 +Two minutes over the agreed target, which I'd rather state tha
+          +n hide. Levers, in                                            
+      577 +the order I'd pull them: `--sweep-fast` (−4.5 min, drops `min_
+          +samples = 25`),                                               
+      578 +stability subsample 12k → 10k (−1 min), `--no-stage2` (−6 min,
+          + forgoes the                                                  
+      579 +spectral-tilt comparison). `--sweep-fast` alone brings it to ~
+          +43 min.                                                       
+      580 +                                                              
+      581  `--quick` reduces to `n1=1024, n=512, m=6, --no-sweep` for a ~
+           5 min smoke run.
+      582  
+      583  ## 16. Outputs
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Update(SPEC.md)
+  ⎿  Added 7 lines, removed 1 line
+      320  matter, since `b < 0.101` (the region where a rest state exist
+           s, §2) lies inside
+      321  the box.
+      322  
+      323 -`P_floor` is set from the convergence-gate run as `10 ×` the m
+          -edian in-band power                                           
+      323 +**`ac_power`** is defined once here and used throughout (§10, 
+          +§14.2, §16.2): the                                            
+      324 +sum of `|X(f)|^2` over the band-limited bins `f ∈ (0, 1000]` H
+          +z of the                                                      
+      325 +mean-subtracted, Hann-windowed, filter-deconvolved spectrum — 
+          +i.e. §9 after step                                            
+      326 +7 and before banding, with `alpha = 0`. It excludes DC by cons
+          +truction, so it                                               
+      327 +measures fluctuation energy only.                             
+      328 +                                                              
+      329 +`P_floor` is set from the convergence-gate run as `10 ×` the m
+          +edian `ac_power`                                              
+      330  of a numerically silent reference sample, and recorded in the 
+           manifest.
+      331  Non-finite samples that survive the §7.3 refinement pass are l
+           abelled `X` and
+      332  excluded; their count is an error-budget metric and should be 
+           zero.
+
+● Update(SPEC.md)
+  ⎿  Added 2 lines, removed 2 lines
+      217  
+      218  24 probe vectors — the 7 canonical types (§12) plus 17 LHS poi
+           nts — integrated at
+      219  `dt_int ∈ {0.04, 0.02, 0.01, 0.005, 0.0025, 0.001}` ms. **Acce
+           pt `dt_int = 0.01`
+      220 -only if the 128-band feature vector (§9) is within 1% relative
+          - L2 of the                                                    
+      221 -`dt = 0.001` reference.** Second check: the same vector must b
+          -e stable when                                                 
+      220 +only if the 128-band feature vector (§9, at `alpha = 0`) is wi
+          +thin 1% relative                                              
+      221 +L2 of the `dt = 0.001` reference.** Second check: the same vec
+          +tor must be stable when                                       
+      222  `dt_out` is halved to 0.05 ms — the direct empirical test that
+            aliasing is
+      223  controlled. If it is not, the remedy is a longer boxcar cascad
+           e, not a smaller
+      224  `dt_int`. Runs in seconds; the pipeline aborts if either check
+            fails.
+
+● Update(SPEC.md)
+  ⎿  Added 15 lines
+      17  Reference: E. M. Izhikevich, "Simple Model of Spiking Neurons",
+           *IEEE Trans.
+      18  Neural Networks* **14**(6):1569–1572, Nov. 2003 (`spikes.pdf`).
+      19  
+      20 +### 1.1 Scope map                                              
+      21 +                                                               
+      22 +Six workflow additions were agreed as in scope beyond the base 
+         +pipeline. `S`                                                  
+      23 +numbers are retained from the review discussion so they stay tr
+         +aceable; `S6`,                                                 
+      24 +`S7` and `S9` were considered and excluded, and are recorded in
+         + §18.                                                          
+      25 +                                                               
+      26 +| | Addition | Where specified |                               
+      27 +|---|---|---|                                                  
+      28 +| S1 | Validate against the paper's 7 known neuron types | §13.
+         +1 |                                                            
+      29 +| S2 | Interpretable per-cluster names from firing diagnostics 
+         +| §7.6, §14.2 |                                                
+      30 +| S3 | Correct the sampler-induced bias in coefficient correlat
+         +ions | §14.1 |                                                 
+      31 +| S4 | Check each cluster is contiguous in parameter space | §1
+         +3.3 |                                                          
+      32 +| S5 | Score cluster stability across embedding seeds (ARI) | §
+         +13.2 |                                                         
+      33 +| S8 | Treat the model as an ODE-with-reset, not a PDE | §2, §7
+         + |                                                             
+      34 +                                                               
+      35  ## 2. The model
+      36  
+      37  The system is a **two-dimensional ODE with a state-dependent re
+          set event** — not
+
+● Update(SPEC.md)
+  ⎿  Added 3 lines, removed 2 lines
+      681  
+      682  ## 18. Out of scope, and why
+      683  
+      684 -These were considered and deliberately excluded from v1. Each 
+          -is recorded so the                                            
+      685 -gap is known rather than forgotten.                           
+      684 +These were considered and deliberately excluded from v1; the `
+          +S` numbering from                                             
+      685 +§1.1 is retained, which is why the list starts at 6. Each is r
+          +ecorded so the gap                                            
+      686 +is known rather than forgotten.                               
+      687  
+      688  6. **Varying `I`.** Two published behaviours are *protocol*-de
+           pendent rather than
+      689     parameter-dependent: TC rebound bursting needs a hyperpolar
+           ising step, and RZ
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Correction, and it's a material one: my CSV sizing was off by 1000×. 26 624 × 
+  20 000 = 5.3e8 values, not 5.3e11 — so full traces as CSV are ~4.3 GB, not 4.8
+  TB, and the full 10 001-bin spectra are ~2.4 GB, not 2.4 TB. Both fit easily
+  in 644 GB free. The awk check above is what surfaced it (0.00 TB). So there's
+  no reason to narrow what you asked for — full simulation results and full DFFT
+  output go to CSV as specified. Updating §8 and §16.2.
+
+● Update(SPEC.md)
+  ⎿  Added 16 lines, removed 7 lines
+      272  
+      273  ## 8. Trace persistence
+      274  
+      275 -**Traces are not persisted for the full sample set.** 26 624 ×
+          - 20 000 × 4 B =                                               
+      276 -2.1 GB as binary, and ~4.8 TB as CSV against 644 GB of free di
+          -sk — infeasible by                                            
+      277 -7×. The integrator is fully deterministic given               
+      278 -`(a, b, c, d, I, v0, u0, dt_int, dt_out)`, so the ~90 represen
+          -tative traces are                                             
+      279 -**re-simulated exactly on demand** in well under a second, wit
+          -h the §7.2 filter                                             
+      280 -disabled for display sharpness. An opt-in `--dump-all-traces` 
+          -writes the full                                               
+      281 -set as `float16 .npy` (1.07 GB).                              
+      275 +Full traces **are** persisted, to CSV, per §16.2. The footprin
+          +t is modest:                                                  
+      276 +`26 624 × 20 000 = 5.32e8` values, so ~4.3 GB of CSV at `%.4g`
+          + and 2.1 GB as                                                
+      277 +`float32` binary, against 644 GB free.                        
+      278  
+      279 +The cost is write *time*, not space. `numpy.savetxt` runs at r
+          +oughly 10 MB/s and                                            
+      280 +would take ~11 min; `pandas.DataFrame.to_csv` with the C engin
+          +e and an explicit                                             
+      281 +`float_format` sustains 60–100 MB/s. **Implementation must use
+          + chunked                                                      
+      282 +`to_csv(mode='a')` at 2048 rows per chunk**, budgeted at 3 min
+          + for all CSV output                                           
+      283 +(§15). `--gzip-csv` compresses the two large files to ~1.7 GB 
+          +combined at the                                               
+      284 +cost of more CPU time; `--compact-csv` skips them entirely, sa
+          +ving the 3 min.                                               
+      285 +                                                              
+      286 +Separately, the integrator is fully deterministic given       
+      287 +`(a, b, c, d, I, v0, u0, dt_int, dt_out)`. The ~90 representat
+          +ive traces are                                                
+      288 +therefore **re-simulated exactly on demand** rather than extra
+          +cted from the CSV,                                            
+      289 +because they need the §7.2 output filter *disabled* for displa
+          +y sharpness — a                                               
+      290 +different signal from the filtered trace that fed the DFFT.   
+      291 +                                                              
+      292  ## 9. Feature pipeline
+      293  
+      294  Per sample, on the 20 000-point analysis window:
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(SPEC.md)
+  ⎿  Added 28 lines, removed 8 lines
+      643  
+      644  Written at `./data` relative to the working directory (`/opt/n
+           euron/data`).
+      645  
+      646 +All matrices use the **same orientation — one row per sample, 
+          +one column per                                                
+      647 +time/frequency** — so every file joins to `samples.csv` on `sa
+          +mple_id`. Column                                              
+      648 +headers carry physical units (ms or Hz), not indices.         
+      649 +                                                              
+      650 +**The two bulk files** — the simulation results and the DFFT o
+          +utput:                                                        
+      651 +                                                              
+      652  | File | Shape | Size |
+      653  |---|---|---|
+      654 +| `traces.csv` | 26 624 × 20 001 — `sample_id` + one column pe
+          +r output sample, headers `t=500.0 … t=2499.9` (ms). The §7.2-f
+          +iltered analysis-window trace, i.e. exactly the signal the DFF
+          +T was computed on. `%.4g` mV. | **~4.3 GB** |                 
+      655 +| `spectra_full.csv` | 26 624 × 10 002 — `sample_id` + the com
+          +plete one-sided rFFT magnitude, headers `f=0.0 … f=5000.0` (Hz
+          +), `Δf = 0.5 Hz`, post-`\|H(f)\|^2`-deconvolution, pre-banding
+          +, `alpha = 0`. `%.6g`. | **~2.4 GB** |                        
+      656 +                                                              
+      657 +The analysis window (20 000 pts) is written rather than the fu
+          +ll 2500 ms so that                                            
+      658 +`traces.csv` and `spectra_full.csv` are row-for-row and sample
+          +-for-sample                                                   
+      659 +consistent — a trace in one file is the exact input to the spe
+          +ctrum in the other.                                           
+      660 +`--csv-full-trace` writes all 25 000 points (~5.3 GB) instead,
+          + breaking that                                                
+      661 +correspondence.                                               
+      662 +                                                              
+      663 +**Derived and summary files:**                                
+      664 +                                                              
+      665 +| File | Shape | Size |                                       
+      666 +|---|---|---|                                                 
+      667  | `samples.csv` | 26 624 × ~35 — `iteration, sample_id, source
+           (lhs\|gp\|seed), a, b, c, d, I, n_spikes, rate, cv_isi, burst_
+           index, spikes_per_burst, adapt_index, mean_v, sd_v, ac_power, 
+           max_local_error, finite, quarantine, label_leaf, label_eom, le
+           tter, membership_prob, umap10_0..9, umap2_0..1` | ~11 MB |
+      649 -| `features_bands.csv` | 26 624 × 128, header = band centre fr
+          -equencies (Hz) | ~31 MB |                                     
+      650 -| `spectra_bandlimited.csv.gz` | 26 624 × 2000, the ≤1 kHz one
+          --sided rFFT magnitudes at `Δf = 0.5 Hz`, post-deconvolution, p
+          -re-banding | ~96 MB gz |                                      
+      651 -| `traces/<LETTER><k>.csv` | ~90 files × 25 000 rows — `t_ms, 
+          -v, u`, full 2500 ms, filter disabled | ~63 MB |               
+      668 +| `features_bands.csv` | 26 624 × 128 — the clustering input, 
+          +headers = band centre frequencies (Hz) | ~31 MB |             
+      669 +| `traces/<LETTER><k>.csv` | ~90 files × 25 000 rows — `t_ms, 
+          +v, u`, full 2500 ms, **filter disabled** (the display signal, 
+          +§16.1) | ~63 MB |                                             
+      670  | `cluster_stats.csv` | one row per cluster — every scalar fro
+           m §14 | <1 MB |
+      671  | `corr_<LETTER>_all.csv`, `corr_<LETTER>_lhs.csv` | 4×4 each,
+            upper triangle empty | <1 MB |
+      654 -| `run_data.npz` | coefficients, 128-band features, diagnostic
+          -s, both embeddings, labels — for re-clustering without re-simu
+          -lating | ~40 MB |                                             
+      672 +| `run_data.npz` | coefficients, 128-band features, diagnostic
+          +s, both embeddings, labels — `float32` binary, for re-clusteri
+          +ng without re-simulating | ~40 MB |                           
+      673  
+      656 -`spectra_bandlimited.csv.gz` is gzipped because the plain CSV 
+          -is 479 MB; it                                                 
+      657 -remains readable by `pandas.read_csv` directly. Full 10 001-bi
+          -n spectra are                                                 
+      658 -**not** written — 2.4 TB as CSV. `--dump-all-traces` adds a 1.
+          -07 GB                                                         
+      659 -`traces_all.npy` (`float16`).                                 
+      674 +Total ~6.9 GB. Flags: `--gzip-csv` writes the two bulk files a
+          +s `.csv.gz`                                                   
+      675 +(~1.7 GB combined, still readable directly by `pandas.read_csv
+          +`);                                                           
+      676 +`--compact-csv` omits them, leaving ~150 MB and saving the 3 m
+          +in of write time                                              
+      677 +(§15). Note that `features_bands.csv` is **not** redundant wit
+          +h                                                             
+      678 +`spectra_full.csv` — it carries the tilt, banding, `log1p` and
+          + L2 steps of §9                                               
+      679 +that `spectra_full.csv` deliberately stops short of.          
+      680  
+      681  ## 17. Test plan and acceptance criteria
+      682  
+
+● Update(SPEC.md)
+  ⎿  Added 8 lines, removed 6 lines
+      600  | Sweep stage 2, `alpha ∈ {0.5, 1}` (features → PCA → UMAP → H
+           DBSCAN) | 6 min |
+      601  | UMAP(2) visualisation fit | 2 min |
+      602  | 5-seed stability on 12k subsample (§13.2) | 6 min |
+      603 -| Validation, stats, figures, CSV writing | 2 min |           
+      604 -| **Total** | **~47 min** |                                   
+      603 +| Validation, stats, figures | 2 min |                        
+      604 +| CSV writing, incl. the 6.7 GB of bulk files (§16.2) | 3 min 
+          +|                                                             
+      605 +| **Total** | **~50 min** |                                   
+      606  
+      606 -Two minutes over the agreed target, which I'd rather state tha
+          -n hide. Levers, in                                            
+      607 -the order I'd pull them: `--sweep-fast` (−4.5 min, drops `min_
+          -samples = 25`),                                               
+      608 -stability subsample 12k → 10k (−1 min), `--no-stage2` (−6 min,
+          - forgoes the                                                  
+      609 -spectral-tilt comparison). `--sweep-fast` alone brings it to ~
+          -43 min.                                                       
+      607 +Five minutes over the agreed ~45 min target, which I'd rather 
+          +state than hide.                                              
+      608 +Levers, in the order I'd pull them: `--sweep-fast` (−4.5 min, 
+          +drops                                                         
+      609 +`min_samples = 25` from stage 1), `--compact-csv` (−3 min, omi
+          +ts the two bulk                                               
+      610 +files), stability subsample 12k → 10k (−1 min), `--no-stage2` 
+          +(−6 min, forgoes                                              
+      611 +the spectral-tilt comparison). `--sweep-fast` alone brings it 
+          +to ~45 min.                                                   
+      612  
+      613  `--quick` reduces to `n1=1024, n=512, m=6, --no-sweep` for a ~
+           5 min smoke run.
+      614  
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Update(SPEC.md)
+  ⎿  Added 6 lines, removed 1 line
+      708  - ≥ 10 clusters at `cluster_selection_method='leaf'`.
+      709  - Mean pairwise ARI across the 5 stability seeds ≥ 0.6.
+      710  - All 7 canonical types placed in a non-noise cluster.
+      711 -- Every §16 artefact present and non-empty; `samples.csv` row 
+          -count equals `N`.                                             
+      711 +- Every §16 artefact present and non-empty; `samples.csv`, `tr
+          +aces.csv`,                                                    
+      712 +  `spectra_full.csv` and `features_bands.csv` all have exactly
+          + `N` data rows and                                            
+      713 +  identical `sample_id` ordering.                             
+      714 +- Round-trip check: re-reading `traces.csv` and recomputing §9
+          + reproduces                                                   
+      715 +  `features_bands.csv` to within 1e-4 relative — proves the tw
+          +o bulk CSVs are                                               
+      716 +  consistent with each other and with the clustering input.   
+      717  
+      718  ## 18. Out of scope, and why
+      719  
+● Spec written and self-reviewed: /opt/neuron/SPEC.md (737 lines, 18 sections).
+
+  One correction to flag: my earlier CSV sizing was wrong by 1000× — I treated
+  26 624 × 20 000 as 5.3e11 values when it's 5.3e8. Full traces are 4.3 GB of
+  CSV and full 10 001-bin spectra 2.4 GB, not terabytes. So nothing needed
+  narrowing: §16.2 now writes the complete simulation results and complete DFFT
+  output to CSV as you asked. The real constraint turned out to be write time
+  (numpy.savetxt ≈ 11 min vs chunked pandas.to_csv ≈ 3 min), so the spec
+  mandates the latter.
+
+  What's in ./data/ — all one-row-per-sample, joinable on sample_id:
+
+  ┌─────────────────────────────────────────────────────────────────┬───────┐
+  │                              File                               │ Size  │
+  ├─────────────────────────────────────────────────────────────────┼───────┤
+  │ traces.csv — 26 624 × 20 001, filtered analysis-window trace    │ ~4.3  │
+  │                                                                 │ GB    │
+  ├─────────────────────────────────────────────────────────────────┼───────┤
+  │ spectra_full.csv — 26 624 × 10 002, full one-sided rFFT         │ ~2.4  │
+  │ magnitude, headers in Hz                                        │ GB    │
+  ├─────────────────────────────────────────────────────────────────┼───────┤
+  │ features_bands.csv, samples.csv, traces/<L><k>.csv,             │ ~150  │
+  │ cluster_stats.csv, corr_*.csv, run_data.npz                     │ MB    │
+  └─────────────────────────────────────────────────────────────────┴───────┘
+
+  traces.csv holds the analysis window specifically so it is the exact input to
+  spectra_full.csv row-for-row, and §17 adds a round-trip acceptance test that
+  re-reading it and recomputing §9 reproduces features_bands.csv.
+
+  Suggestions in scope, mapped in §1.1 so you can verify: S1 canonical-type
+  validation (§13.1), S2 cluster naming (§7.6, §14.2), S3 correlation de-biasing
+  (§14.1), S4 contiguity (§13.3), S5 stability ARI (§13.2), S8 ODE-with-reset
+  framing (§2, §7). S6/S7/S9 recorded as excluded in §18.
+
+  Two other things the self-review caught:
+  - The §12.3 sweep was 162 configs (~40 min of HDBSCAN alone) because I'd
+  folded alpha in without recomputing — alpha is a feature-pipeline parameter,
+  so changing it invalidates features, PCA and every UMAP fit. Now staged: 54
+  clustering configs at alpha=0, then 2 tilt configs on the winner.
+  - Honest budget is now ~50 min, not 45. Levers listed in §15; --sweep-fast
+  alone brings it to ~45.
+
+  Your questions, answered concretely: n = 4096 then 2048 × 11, m = 12, N = 26
+  624 · DP5 fixed-step at dt_int = 0.01 ms, event-at-step-end with peak
+  equalisation, per-sample (not per-step) refinement, blocking convergence gate
+  · simulation length 2500 ms with 500 ms discarded, 2000 ms analysed — set by
+  the slowest rhythm, giving a 4 Hz firing-rate floor · UMAP before HDBSCAN = 10
+  dims (n_neighbors=30, min_dist=0.0), with a separate independent 2D fit for
+  plotting only.
+
+  Two open items before I'd want to implement:
+
+  1. Representative figure layout. I specified A1.png–A3.png as two-panel
+  figures (trace on top, spectrum below) plus A_traces.png. Your wording could
+  also mean strictly separate files — say if you'd prefer A1_trace.png /
+  A1_fft.png.
+  2. /output needs sudo mkdir -p /output && sudo chown $USER /output. Until then
+  figures land in /opt/neuron/output.
+
+  Review SPEC.md when you get a chance. Once you're happy with it I'll turn it
+  into an implementation plan and build it.
+
+✻ Sautéed for 6m 35s
+
+❯ by /output I mean ./output . for the figure layout, put them in the same      
+  file.                                                                         
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(SPEC.md)
+  ⎿  Added 13 lines, removed 10 lines
+      614  
+      615  ## 16. Outputs
+      616  
+      617 -### 16.1 `./output/` (configurable `--outdir`; defaults to `/o
+          -pt/neuron/output`)                                            
+      617 +### 16.1 `./output/`                                          
+      618  
+      619 -`/output` at filesystem root is **not writable and cannot be c
+          -reated without                                                
+      620 -root** on this machine. To use the literal path:              
+      621 -`sudo mkdir -p /output && sudo chown $USER /output`, then pass
+          - `--outdir /output`.                                          
+      619 +Written at `./output` relative to the working directory (`/opt
+          +/neuron/output`),                                             
+      620 +created if absent, and overridable with `--outdir`. The same c
+          +onvention as                                                  
+      621 +`./data` (§16.2) — neither path is at the filesystem root.    
+      622  
+      623  - `clusters_umap2d.png` — 2D scatter, clusters labelled `A, B,
+            C, …` at their
+      624    centroids, HDBSCAN noise in light grey, `Z` plotted separate
+           ly, and the 7
+      625    canonical types overlaid as annotated markers (§13.1). `UNST
+           ABLE` and
+      626    `MULTIMODAL` clusters marked in the legend. 200 dpi, plus a 
+           `plt.show()` popup.
+      627 -- `A1.png … A3.png`, `B1.png …` — one per representative, a tw
+          -o-panel figure:                                               
+      628 -  **top** `v(t)` over the full 2500 ms with the analysis windo
+          -w shaded;                                                     
+      629 -  **bottom** `|rFFT|` vs frequency, linear 0–500 Hz with a log
+          --`f` inset,                                                   
+      630 -  dominant peaks annotated in Hz.                             
+      631 -- `A_traces.png`, … — the cluster's three representative trace
+          -s stacked for                                                 
+      632 -  direct comparison.                                          
+      627 +- `A1.png, A2.png, A3.png, B1.png, …` — **one file per represe
+          +ntative, holding                                              
+      628 +  both of its graphs**: a two-panel figure with **top** `v(t)`
+          + over the full                                                
+      629 +  2500 ms, analysis window shaded, and **bottom** `|rFFT|` vs 
+          +frequency, linear                                             
+      630 +  0–500 Hz with a log-`f` inset, dominant peaks annotated in H
+          +z. Shared figure                                              
+      631 +  title carries the cluster letter, its §14.2 name, and the sa
+          +mple's                                                        
+      632 +  `(a, b, c, d)`.                                             
+      633 +- `A_traces.png`, … — one extra per cluster, stacking that clu
+          +ster's three                                                  
+      634 +  representative traces on a common axis for direct comparison
+          +. Additive to the                                             
+      635 +  per-representative files above, not a replacement for them. 
+      636  - `cluster_report.md` — names (§14.2), means, both triangular 
+           matrices (§14.1),
+      637    flags, canonical placements, stability and contiguity result
+           s. Also printed to
+      638    stdout.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Update(SPEC.md)
+  ⎿  Added 3 lines, removed 1 line
+      646  
+      647  ### 16.2 `./data/` — created after the calculations complete
+      648  
+      649 -Written at `./data` relative to the working directory (`/opt/n
+          -euron/data`).                                                 
+      649 +Written at `./data` relative to the working directory (`/opt/n
+          +euron/data`),                                                 
+      650 +created if absent once the calculations complete, and overrida
+          +ble with                                                      
+      651 +`--datadir`.                                                  
+      652  
+      653  All matrices use the **same orientation — one row per sample, 
+           one column per
+      654  time/frequency** — so every file joins to `samples.csv` on `sa
+           mple_id`. Column
+
+● Both applied to /opt/neuron/SPEC.md:
+
+  Paths (§16.1, §16.2) — ./output and ./data, both relative to the working
+  directory, created if absent, overridable via --outdir / --datadir. The
+  sudo/root note is gone; nothing writes to the filesystem root. Verified no
+  stray root-path references remain.
+
+  Figure layout (§16.1) — confirmed as one file per representative holding both
+  graphs: A1.png, A2.png, A3.png, B1.png, … each a two-panel figure (top v(t)
+  over the full 2500 ms with the analysis window shaded; bottom |rFFT| vs
+  frequency, linear 0–500 Hz plus a log-f inset, peaks annotated in Hz). Figure
+  title carries the cluster letter, its §14.2 name, and the sample's (a, b, c, 
+  d).
+
+  I kept A_traces.png (the three traces stacked per cluster) as an additive
+  extra rather than removing it — it's the one view that lets you eyeball
+  whether a cluster's three representatives actually look alike, which is the
+  quickest sanity check on cluster quality. Say the word if you'd rather not
+  have it.
+
+  The spec is complete and self-reviewed — no placeholders, arithmetic verified,
+  cross-references consistent, budget summing to ~50 min with the trim levers
+  documented. Read it over when you have a moment. Once you approve, next step
+  is turning it into an implementation plan, then building it.
+
+✻ Cogitated for 37s
+
+❯ What is the time bottleneck in this process?                                  
+
+● Good question to ask before building, because the answer isn't where the
+  project's name points.
+
+  Time by kind of work, aggregated from §15
+
+  ┌─────────────────────────────────────────────────────────┬───────┬───────┐
+  │                          Work                           │ Time  │ Share │
+  ├─────────────────────────────────────────────────────────┼───────┼───────┤
+  │ HDBSCAN (sweep 13.5 + interim 4 + stage 2 & stability   │ 19    │ 38%   │
+  │ 1.5)                                                    │ min   │       │
+  ├─────────────────────────────────────────────────────────┼───────┼───────┤
+  │ UMAP (3 sweep fits 7.5 + stage 2 3.5 + 2D 2 + stability │ 18    │ 36%   │
+  │  5)                                                     │ min   │       │
+  ├─────────────────────────────────────────────────────────┼───────┼───────┤
+  │ GPU total (ODE sim, rFFT, GP fits, acquisition,         │ ~6    │ 12%   │
+  │ convergence gate)                                       │ min   │       │
+  ├─────────────────────────────────────────────────────────┼───────┼───────┤
+  │ CSV writing                                             │ 3 min │ 6%    │
+  ├─────────────────────────────────────────────────────────┼───────┼───────┤
+  │ PCA + validation + stats + figures                      │ ~4    │ 8%    │
+  │                                                         │ min   │       │
+  └─────────────────────────────────────────────────────────┴───────┴───────┘
+
+  UMAP + HDBSCAN are 74% of the run. The GPU-accelerated part is ~6 min, and the
+  Dormand–Prince integration proper — the thing the whole program is nominally
+  about — is ~1.4 min of 50. That asymmetry is why §11.1 sizes N by what UMAP
+  can chew rather than by what the GPU can simulate.
+
+  So the bottleneck is single-machine CPU clustering. But it decomposes into two
+  causes that are both choices, not physical limits:
+
+  Cause 1 — the sweep rebuilds work it doesn't need to (≈11 min recoverable)
+
+  HDBSCAN's expensive phase is the mutual-reachability MST and single-linkage
+  tree. That depends on the embedding and on min_samples only. min_cluster_size
+  is applied afterwards when condensing the tree, and cluster_selection_method
+  later still when extracting clusters from the condensed tree — both cheap.
+
+  My §12.3 stage-1 sweep runs 54 independent HDBSCAN.fit calls, so it rebuilds
+  the same tree 6 times over. It should be 9 tree builds (3 embeddings × 3
+  min_samples), each followed by 6 near-free extractions: 3 min_cluster_size × 2
+  methods.
+
+  9 × 15 s ≈ 2.5 min instead of 13.5 min. The hdbscan package exposes enough to
+  do this (single_linkage_tree_ plus _tree_to_labels), though it's a
+  semi-internal API and relative_validity_ still costs something per labelling —
+  so call it 3–4 min realistically.
+
+  Cause 2 — random_state makes UMAP single-threaded (≈8 min recoverable)
+
+  umap-learn disables parallelism in the layout optimisation when random_state
+  is set, to guarantee reproducibility. My §12.1 sets random_state=42 on every
+  fit, so all 11 UMAP fits run on 1 of 22 available threads.
+
+  The fix is to be selective about where determinism is actually worth paying
+  for:
+  - Keep seeded: the one final reported 10D embedding and the 2D visualisation
+  embedding. These feed the published figures and the §17 determinism criterion,
+  so they must be reproducible.
+  - Unseed: the 3 exploratory sweep fits (they only need to be mutually
+  comparable within a run, not across runs) and especially the 5 stability fits
+  — §13.2 deliberately wants 5 different embeddings, so 5 independent unseeded
+  parallel fits are exactly the right thing and are also the fastest.
+
+  I'd want to measure the actual speedup rather than assume it, but even 4× on 9
+  of 11 fits takes UMAP from ~18 min to ~11 min.
+
+  A third, smaller lever: I set n_epochs=500 where umap-learn defaults to 200
+  for N > 10k. Dropping to 300 would cut layout time ~40%, at some cost to how
+  crisply the density structure resolves. I'd treat this as a measured
+  trade-off, not a default change.
+
+  Net
+
+  Both fixes together: ~50 min → ~31–34 min, with no reduction in N, trace
+  length, sweep coverage, or statistical rigour — it's the same work, just not
+  repeated. That also makes the §15 trim levers (--sweep-fast, --compact-csv)
+  unnecessary for hitting your 45 min target, and leaves headroom you could
+  spend on a larger N instead.
+
+  Worth noting what is not the bottleneck, so it doesn't get optimised by
+  reflex: the fused CUDA kernel, the 0.01 ms timestep, the 2500 ms trace length,
+  and the GP. Halving dt_int to 0.005 ms would cost under a minute. If
+  anything, the budget says we could afford a finer timestep or a longer trace
+  than §6 specifies.
+
+  Want me to fold both fixes into §12.3 and §13.2 and re-derive the §15 budget?
+  The HDBSCAN tree-reuse one changes an interface (the sweep needs to drive the
+  tree and the extraction separately), so it's better in the spec than
+  discovered during implementation.
+
+✻ Cooked for 1m 27s
+
+❯ Apply these suggestions. Did you suggest earlier to run PCA(50) before umap?  
+  Does that suggestion still apply?                                             
+
+● Yes — §12.1 specifies PCA(50) before UMAP. It still applies, and the reasoning
+  actually got stronger, but one of my three original justifications was
+  overstated and needs rewording. Let me read the sections before editing.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Update(SPEC.md)
+  ⎿  Added 1 line, removed 1 line
+      430    ~15–20 dims.
+      431  
+      432  Parameters: `n_neighbors=30, min_dist=0.0, n_components=10, me
+           tric='euclidean',
+      433 -n_epochs=500, random_state=42`.                               
+      433 +n_epochs=500`; `random_state` per the policy in §12.4.        
+      434  
+      435  - `min_dist=0.0` **specifically because this embedding feeds a
+            density
+      436    clusterer** — it lets points pack arbitrarily tightly, maxim
+           ising density
+
+● Update(SPEC.md)
+  ⎿  Added 51 lines, removed 2 lines
+      441  - `metric='euclidean'` on L2-normalised features is monotone-e
+           quivalent to
+      442    cosine, so it yields an identical k-NN graph and is faster.
+      443  
+      444 -**PCA(50) before UMAP** — retains >99% of the 128 bands' varia
+          -nce, denoises,                                                
+      445 -~3× faster k-NN, and the same basis is reused by the GP sample
+          -r (§11.2).                                                    
+      444 +**PCA(50) before UMAP**, `whiten=False`, fitted on the 128-ban
+          +d matrix. Three                                               
+      445 +reasons, in descending strength:                              
+      446  
+      447 +1. **It costs nothing, because it is computed anyway.** §11.2 
+          +needs the first 6                                             
+      448 +   PCs every iteration to drive the GP sampler, so the basis a
+          +lready exists.                                                
+      449 +   Feeding the same projection to UMAP is free.               
+      450 +2. **Denoising.** The 128 bands are strongly correlated (neigh
+          +bouring bands of a                                            
+      451 +   harmonic comb move together); 50 PCs retain >99% of the var
+          +iance while                                                   
+      452 +   dropping the low-variance band-to-band noise that would oth
+          +erwise enter the                                              
+      453 +   k-NN graph.                                                
+      454 +3. **Speed, but less than it sounds.** PCA cuts the distance c
+          +omputation from                                               
+      455 +   128 to 50 dimensions, a ~2.5× reduction — **but only in the
+          + k-NN graph                                                   
+      456 +   phase.** UMAP's layout optimisation operates in the *output
+          +* space and is                                                
+      457 +   indifferent to input dimension, and at `N ≈ 27k` the layout
+          + is the larger                                                
+      458 +   share of the fit. Expect ~20–30% off a UMAP fit, not 3×. (A
+          +n earlier draft                                               
+      459 +   said "~3× faster k-NN", which is true of that phase and mis
+          +leading about the                                             
+      460 +   fit as a whole.)                                           
+      461 +                                                              
+      462 +`whiten=False` deliberately: whitening equalises variance acro
+          +ss components,                                                
+      463 +which would amplify exactly the low-variance noise directions 
+          +that reason 2                                                 
+      464 +exists to suppress.                                           
+      465 +                                                              
+      466 +**Residual risk, and the guard.** PCA is a linear projection, 
+          +so a rare cluster                                             
+      467 +distinguished only by a low-variance direction could in princi
+          +ple be flattened                                              
+      468 +before UMAP sees it. At >99% retained variance this is unlikel
+          +y but not                                                     
+      469 +impossible. §17 therefore asserts cumulative explained varianc
+          +e at 50 PCs ≥ 99%                                             
+      470 +and records the full variance curve in the manifest; if 50 com
+          +ponents fall short,                                           
+      471 +raise `n_components` rather than proceeding.                  
+      472 +                                                              
+      473  ### 12.2 Visualisation embedding — `n_components = 2`
+      474  
+      475  `n_neighbors=30, min_dist=0.1`, fitted **independently** on th
+           e same PCA(50)
+      476  input, coloured by the 10D labels.
+      477  
+      478 +### 12.4 `random_state` policy — determinism only where it is 
+          +paid for                                                      
+      479 +                                                              
+      480 +umap-learn **disables parallelism in the layout optimisation w
+          +henever                                                       
+      481 +`random_state` is set**, to guarantee reproducibility. Seeding
+          + every fit would                                              
+      482 +therefore run all of them on 1 of this machine's 22 threads, a
+          +nd UMAP is 36% of                                             
+      483 +the runtime (§15). Determinism is bought selectively:         
+      484 +                                                              
+      485 +| Fit | `random_state` | Why |                                
+      486 +|---|---|---|                                                 
+      487 +| Final reported 10D clustering embedding | **42** | feeds the
+          + published labels and the §17 determinism criterion |         
+      488 +| 2D visualisation embedding (§12.2) | **42** | feeds the publ
+          +ished scatter plot |                                          
+      489 +| 3 exploratory sweep fits (§12.3 stage 1) | `None` | need onl
+          +y be mutually comparable *within* a run; the winning config is
+          + re-fitted seeded before reporting |                          
+      490 +| 2 stage-2 tilt fits (§12.3) | `None` | same |               
+      491 +| 5 stability fits (§13.2) | `None` | §13.2 *wants* five diffe
+          +rent embeddings, so independent unseeded fits are both correct
+          + and fastest |                                                
+      492 +                                                              
+      493 +The measured single- vs multi-threaded ratio must be recorded 
+          +in the manifest —                                             
+      494 +the ~4× assumed in §15 is an estimate, not a measurement.     
+      495 +                                                              
+      496 +`n_epochs` is a third lever, not exercised by default: umap-le
+          +arn defaults to 200                                           
+      497 +for `N > 10k` and this spec uses 500 for crisper density struc
+          +ture. Dropping to                                             
+      498 +300 would cut layout time ~40%. Treat any change as a measured
+          + trade-off against                                            
+      499 +cluster crispness, not a free win.                            
+      500 +                                                              
+      501  ### 12.3 HDBSCAN
+      502  
+      503  `min_cluster_size=60` (≈0.22% of `N`), `min_samples=10`,
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Now the HDBSCAN tree-reuse restructure in §12.4:
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(SPEC.md)
+  ⎿  Added 36 lines, removed 7 lines
+      522  
+      523  - **Stage 1 — clustering parameters at `alpha = 0`:** `n_neigh
+           bors ∈ {15,30,50}`
+      524    × `min_cluster_size ∈ {30,60,120}` × `min_samples ∈ {5,10,25
+           }` × method ∈
+      525 -  `{leaf,eom}` = **54 configs**. UMAP(10) refits only 3× (once
+          - per                                                          
+      526 -  `n_neighbors`); HDBSCAN is ~15 s per config → ~13.5 min.    
+      525 +  `{leaf,eom}` = **54 configs**, evaluated with tree reuse (§1
+          +2.4.1) in                                                     
+      526 +  **9 tree builds** → ~3.5 min, not 54 fits → 13.5 min.       
+      527  - **Stage 2 — spectral tilt, holding stage 1's winner fixed:**
+            `alpha ∈ {0.5, 1}`
+      528    = **2 configs**, each requiring a features → PCA → UMAP(10) 
+           → HDBSCAN
+      529 -  re-run → ~6 min.                                            
+      529 +  re-run → ~4 min.                                            
+      530  
+      531  Scored by **`relative_validity_` (DBCV)** with a penalty for n
+           oise fraction above
+      532 -25%. Both stage tables are reported; the overall winner drives
+          - the figures, with                                            
+      533 -the hand-set defaults above as the reproducible fallback and a
+          -s the config                                                  
+      534 -reported when the sweep is skipped (`--no-sweep`). `--sweep-fa
+          -st` drops                                                     
+      535 -`min_samples = 25` from stage 1 (36 configs, ~9 min).         
+      532 +25%. Both stage tables are reported; the overall winner drives
+          + the figures and is                                           
+      533 +**re-fitted once with `random_state=42`** (§12.3) before anyth
+          +ing is reported,                                              
+      534 +with the hand-set defaults above as the reproducible fallback 
+          +and as the config                                             
+      535 +reported when the sweep is skipped (`--no-sweep`).            
+      536  
+      537 +#### 12.4.1 Tree reuse — the sweep must not refit what it does
+          + not change                                                   
+      538 +                                                              
+      539 +A naive sweep calls `HDBSCAN.fit` 54 times, which rebuilds the
+          + same trees six                                               
+      540 +times over. The cost structure of the algorithm is staged, and
+          + the sweep must                                               
+      541 +mirror it:                                                    
+      542 +                                                              
+      543 +| Phase | Depends on | Cost |                                 
+      544 +|---|---|---|                                                 
+      545 +| core distances → mutual-reachability MST → single-linkage tr
+          +ee | embedding, `min_samples`, metric | **dominant** (~15 s at
+          + `N ≈ 27k`, 10D) |                                            
+      546 +| condense the tree | `min_cluster_size` | cheap |            
+      547 +| extract clusters from the condensed tree | `cluster_selectio
+          +n_method`, `allow_single_cluster`, `cluster_selection_epsilon`
+          + | cheap |                                                    
+      548 +                                                              
+      549 +So stage 1 is **9 tree builds** (3 embeddings × 3 `min_samples
+          +`), each followed                                             
+      550 +by 6 near-free extractions (3 `min_cluster_size` × 2 methods).
+          + `9 × 15 s ≈                                                  
+      551 +2.3 min`, plus per-labelling `relative_validity_` evaluation, 
+          +which is not free —                                           
+      552 +budget **~3.5 min** against the 13.5 min a naive sweep would c
+          +ost.                                                          
+      553 +                                                              
+      554 +Implementation: call `hdbscan.hdbscan()` once per (embedding, 
+          +`min_samples`) to                                             
+      555 +obtain the `single_linkage_tree_`, then re-run only the conden
+          +se/extract steps                                              
+      556 +via `hdbscan.hdbscan_._tree_to_labels` for each `(min_cluster_
+          +size, method)`                                                
+      557 +pair. This is a semi-internal API, so §17 requires a test asse
+          +rting that a                                                  
+      558 +reused-tree labelling is **identical** to a full `HDBSCAN.fit`
+          + at the same                                                  
+      559 +parameters; if the API shifts under a version bump, that test 
+          +fails loudly rather                                           
+      560 +than silently producing different clusters. `--no-tree-reuse` 
+          +falls back to 54                                              
+      561 +full fits.                                                    
+      562 +                                                              
+      563 +`--sweep-fast` drops `min_samples = 25` from stage 1 (36 confi
+          +gs, 6 tree builds,                                            
+      564 +~2.3 min).                                                    
+      565 +                                                              
+      566  **Cluster labelling:** clusters are sorted by descending size 
+           and assigned
+      567  `A, B, C, …` (then `AA, AB, …` beyond 26). `Z` is reserved for
+            quarantine (§10),
+      568  `X` for non-finite, and HDBSCAN noise (`-1`) is reported as `n
+           oise`, never
+
+● Now §13.2 (stability) and the §15 budget:
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(SPEC.md)
+  ⎿  Added 18 lines, removed 5 lines
+      600  
+      601  ### 13.2 S5 — cluster stability
+      602  
+      603 -Re-run the chosen config under **5 UMAP seeds** on a 12 000-po
+          -int subsample.                                                
+      604 -Report mean pairwise **Adjusted Rand Index** across seeds, and
+          - per-cluster                                                  
+      605 -**persistence** = fraction of seeds in which some cluster atta
+          -ins ≥0.5 Jaccard                                              
+      606 -overlap with it. Clusters below 0.6 persistence are flagged `U
+          -NSTABLE` in all                                               
+      607 -reports. An unstable cluster is an artefact of the embedding, 
+          -not a finding.                                                
+      603 +Re-run the chosen config under **5 independent UMAP embeddings
+          +** on a                                                       
+      604 +12 000-point subsample. Report mean pairwise **Adjusted Rand I
+          +ndex** across them,                                           
+      605 +and per-cluster **persistence** = fraction of embeddings in wh
+          +ich some cluster                                              
+      606 +attains ≥0.5 Jaccard overlap with it. Clusters below 0.6 persi
+          +stence are flagged                                            
+      607 +`UNSTABLE` in all reports. An unstable cluster is an artefact 
+          +of the embedding,                                             
+      608 +not a finding.                                                
+      609  
+      610 +The 5 fits use **`random_state=None`** (§12.3), which is both 
+          +correct and fastest                                           
+      611 +here: this test deliberately wants five *different* embeddings
+          +, so there is                                                 
+      612 +nothing for a fixed seed to buy, and leaving it unset restores
+          + multi-threaded                                               
+      613 +layout optimisation. The five fits are independent, so they al
+          +so run concurrently                                           
+      614 +across the 22 available threads. Budget ~1.5 min rather than ~
+          +6 min.                                                        
+      615 +                                                              
+      616 +Consequence worth stating: the stability *number* is therefore
+          + not bitwise                                                  
+      617 +reproducible between runs — it is a Monte-Carlo estimate over 
+          +embeddings. That is                                           
+      618 +the correct semantics for a stability statistic, but it means 
+          +the §17 acceptance                                            
+      619 +threshold (mean ARI ≥ 0.6) is a threshold on an estimate, and 
+          +a run landing at                                              
+      620 +0.60 ± 0.03 should be re-run rather than treated as a crisp pa
+          +ss or fail.                                                   
+      621 +                                                              
+      622  ### 13.3 S4 — contiguity in parameter space
+      623  
+      624  For each cluster, run single-linkage on its own `(a,b,c,d)` po
+           ints in the
+
+● Update(SPEC.md)
+  ⎿  Added 38 lines, removed 18 lines
+      680  
+      681  Example rendering: `C — fast tonic, +adapting (n=1842, rate 94
+            Hz, CV 0.08)`.
+      682  
+      683 -## 15. Runtime budget (~47 min, against the agreed ~45 min tar
+          -get)                                                          
+      683 +## 15. Runtime budget (~32 min, inside the agreed ~45 min targ
+          +et)                                                           
+      684  
+      685 -| Stage | Time |                                              
+      686 -|---|---|                                                     
+      687 -| Convergence gate (§7.4) | 1 min |                           
+      688 -| 12 iterations × ~45 s (sim 3 s · rFFT 1 s · PCA 2 s · GP fit
+          - 10 s · acquisition 5 s · interim HDBSCAN 20 s) | 9 min |     
+      689 -| Final PCA + 3 UMAP(10) fits at 27k (sweep stage 1) | 8 min |
+      690 -| HDBSCAN sweep stage 1, 54 configs | 13.5 min |              
+      691 -| Sweep stage 2, `alpha ∈ {0.5, 1}` (features → PCA → UMAP → H
+          -DBSCAN) | 6 min |                                             
+      692 -| UMAP(2) visualisation fit | 2 min |                         
+      693 -| 5-seed stability on 12k subsample (§13.2) | 6 min |         
+      694 -| Validation, stats, figures | 2 min |                        
+      695 -| CSV writing, incl. the 6.7 GB of bulk files (§16.2) | 3 min 
+          -|                                                             
+      696 -| **Total** | **~50 min** |                                   
+      685 +| Stage | Time | Device |                                     
+      686 +|---|---|---|                                                 
+      687 +| Convergence gate (§7.4) | 1 min | GPU |                     
+      688 +| 12 iterations × ~45 s (sim 3 s · rFFT 1 s · PCA 2 s · GP fit
+          + 10 s · acquisition 5 s · interim HDBSCAN 20 s) | 9 min | GPU 
+          ++ CPU |                                                       
+      689 +| Final PCA + 3 unseeded UMAP(10) fits at 27k (sweep stage 1) 
+          +| 2.5 min | CPU ×22 |                                         
+      690 +| HDBSCAN sweep stage 1, 54 configs via 9 tree builds (§12.4.1
+          +) | 3.5 min | CPU |                                           
+      691 +| Sweep stage 2, `alpha ∈ {0.5, 1}` (features → PCA → UMAP → H
+          +DBSCAN) | 4 min | GPU + CPU |                                 
+      692 +| Final seeded UMAP(10) re-fit of the winning config (§12.3) |
+          + 2.5 min | CPU ×1 |                                           
+      693 +| Seeded UMAP(2) visualisation fit | 2 min | CPU ×1 |         
+      694 +| 5-embedding stability on 12k subsample (§13.2), unseeded & c
+          +oncurrent | 1.5 min | CPU ×22 |                               
+      695 +| Validation, stats, figures | 2 min | CPU |                  
+      696 +| CSV writing, incl. the 6.7 GB of bulk files (§16.2) | 3 min 
+          +| I/O |                                                       
+      697 +| **Total** | **~32 min** | |                                 
+      698  
+      698 -Five minutes over the agreed ~45 min target, which I'd rather 
+          -state than hide.                                              
+      699 -Levers, in the order I'd pull them: `--sweep-fast` (−4.5 min, 
+          -drops                                                         
+      700 -`min_samples = 25` from stage 1), `--compact-csv` (−3 min, omi
+          -ts the two bulk                                               
+      701 -files), stability subsample 12k → 10k (−1 min), `--no-stage2` 
+          -(−6 min, forgoes                                              
+      702 -the spectral-tilt comparison). `--sweep-fast` alone brings it 
+          -to ~45 min.                                                   
+      699 +**Where the time goes, and what it means for optimisation.** E
+          +ven after the                                                 
+      700 +restructure, CPU clustering remains the largest block (~12 min
+          + of 32); the GPU                                              
+      701 +work is ~7 min, of which the Dormand–Prince integration proper
+          + is **~1.4 min**.                                             
+      702 +The integrator is not the bottleneck and should not be optimis
+          +ed further. If                                                
+      703 +anything, the headroom argues the other way: `dt_int` could be
+          + halved, or                                                   
+      704 +`T_total` extended, for well under a minute each.             
+      705  
+      706 +Two restructures got this from ~50 min to ~32, both by removin
+          +g repeated work                                               
+      707 +rather than reducing scope — `N`, trace length, sweep coverage
+          + and statistical                                              
+      708 +rigour are all unchanged:                                     
+      709 +- **§12.4.1 tree reuse:** 13.5 → 3.5 min. The sweep was rebuil
+          +ding the same                                                 
+      710 +  single-linkage tree six times per `min_samples`.            
+      711 +- **§12.3 selective seeding:** ~18 → ~8.5 min of UMAP. Seeding
+          + every fit forced                                             
+      712 +  all of them onto 1 of 22 threads; only the two reported embe
+          +ddings need it.                                               
+      713 +                                                              
+      714 +Both savings rest on estimates that must be replaced with meas
+          +urements and                                                  
+      715 +recorded in the manifest: the single- vs multi-threaded UMAP r
+          +atio (assumed ~4×)                                            
+      716 +and the tree-build-to-extraction cost ratio.                  
+      717 +                                                              
+      718 +Remaining levers, now unnecessary but retained: `--sweep-fast`
+          + (−1.2 min),                                                  
+      719 +`--compact-csv` (−3 min), `--no-stage2` (−4 min). The ~13 min 
+          +of headroom against                                           
+      720 +your 45 min target is better spent raising `N` — see §11.1 — t
+          +han banked.                                                   
+      721 +                                                              
+      722  `--quick` reduces to `n1=1024, n=512, m=6, --no-sweep` for a ~
+           5 min smoke run.
+      723  
+      724 +`--quick` reduces to `n1=1024, n=512, m=6, --no-sweep` for a ~
+          +5 min smoke run.                                              
+      725 +                                                              
+      726  ## 16. Outputs
+      727  
+      728  ### 16.1 `./output/`
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Now the §17 test/acceptance additions that these changes require:
+● Update(SPEC.md)
+  ⎿  Added 13 lines, removed 1 line
+      814     rank-1 variance update matches a full recompute to 1e-10.
+      815  7. **Triangular formatting** — upper triangle renders empty, d
+           iagonal equals
+      816     `numpy.std(ddof=1)`, lower triangle equals `numpy.corrcoef`
+           .
+      817 -8. **Determinism** — identical seed produces bitwise-identical
+          - features.                                                    
+      817 +8. **Determinism** — identical seed produces bitwise-identical
+          + features, and the                                            
+      818 +   two seeded UMAP fits (§12.3) reproduce bitwise across runs.
+          + The unseeded fits                                            
+      819 +   are explicitly exempt.                                     
+      820 +9. **Tree reuse equivalence (§12.4.1)** — for a fixed embeddin
+          +g, a labelling                                                
+      821 +   obtained via `_tree_to_labels` on a reused `single_linkage_
+          +tree_` is                                                     
+      822 +   **identical** to a full `HDBSCAN.fit` at the same parameter
+          +s, across all 6                                               
+      823 +   `(min_cluster_size, method)` combinations. This guards a se
+          +mi-internal API: a                                            
+      824 +   version bump that changes it must fail here rather than sil
+          +ently produce                                                 
+      825 +   different clusters.                                        
+      826 +10. **PCA sufficiency (§12.1)** — cumulative explained varianc
+          +e at 50 components                                            
+      827 +    is ≥ 99% on the real feature matrix. Below that, `n_compon
+          +ents` must be                                                 
+      828 +    raised rather than the check relaxed; the full variance cu
+          +rve goes in the                                               
+      829 +    manifest.                                                 
+      830  
+      831  Acceptance criteria for a full run:
+      832  - Convergence gate (§7.4) passes both checks.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Both applied, and SPEC.md is now 863 lines.
+
+  What changed
+
+  §12.4.1 — tree reuse (new subsection). The sweep now mirrors HDBSCAN's cost
+  structure: the MST/single-linkage tree depends on the embedding and
+  min_samples only, so stage 1 is 9 tree builds followed by 6 cheap
+  condense/extract passes each, instead of 54 full fits. 13.5 → ~3.5 min.
+  Because this leans on a semi-internal API (single_linkage_tree_ +
+  _tree_to_labels), §17 test 9 asserts reused-tree labellings are identical to
+  full fits across all 6 combinations, so a version bump fails loudly rather
+  than silently changing clusters. --no-tree-reuse falls back.
+
+  §12.3 — random_state policy (new subsection; old §12.3 became §12.4). Only the
+  two reported embeddings are seeded; the 3 sweep fits, 2 tilt fits and 5
+  stability fits run unseeded and multi-threaded. The sweep winner is re-fitted
+  seeded before anything is reported, so reproducibility of published output is
+  preserved. UMAP ~18 → ~8.5 min. §13.2 also gained a note that the ARI figure
+  is now a Monte-Carlo estimate, so 0.60 ± 0.03 means re-run, not pass/fail.
+
+  §15 — budget re-derived: ~50 → ~31 min, with a device column. Both savings
+  rest on estimates (the ~4× threading ratio, the tree-build/extraction ratio)
+  that the manifest must now record as measurements.
+
+  On PCA(50) — yes, and the case is stronger, but one claim was overstated
+
+  It still applies. §12.1 is rewritten with the reasons ordered by actual
+  strength:
+
+  1. It's free. §11.2 needs the first 6 PCs every iteration for the GP sampler,
+  so the basis is computed regardless. Feeding the same projection to UMAP costs
+  nothing.
+  2. Denoising. Neighbouring bands of a harmonic comb move together; 50 PCs keep
+  >99% of variance while dropping band-to-band noise that would otherwise enter
+  the k-NN graph. (whiten=False deliberately — whitening would amplify exactly
+  those noise directions.)
+  3. Speed — and here I was wrong. I'd written "~3× faster k-NN." That's true of
+  the k-NN phase, but misleading as stated: UMAP's layout optimisation runs in
+  the output space and is indifferent to input dimension, and at N≈27k the
+  layout is the larger share of the fit. Real effect is ~20–30% off a UMAP fit,
+  not 3×. The spec now says so explicitly and flags the earlier wording.
+
+  So PCA survives on reasons 1 and 2, not on the speed argument I originally led
+  with — which is worth knowing, because it means PCA is not one of the levers
+  for the bottleneck. The two restructures above are.
+
+  One residual risk I added a guard for: PCA is linear, so a rare cluster
+  separated only along a low-variance direction could be flattened before UMAP
+  sees it. §17 test 10 asserts cumulative explained variance at 50 PCs ≥ 99% on
+  the real feature matrix, with the instruction to raise n_components rather
+  than relax the check.
+
+  There's now ~14 min of headroom against your 45 min target. §15 recommends
+  spending it on a larger N rather than banking it — at ~31 min, n = 4096 per
+  iteration (N ≈ 53k) would roughly double sample density for maybe +8 min,
+  mostly in UMAP. Worth deciding before I write the implementation plan, since N
+  propagates into min_cluster_size, N_gp, and the CSV sizes.
+
+✻ Worked for 2m 47s
