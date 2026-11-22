@@ -11,6 +11,7 @@ if SRC not in sys.path:
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "gpu: requires a working CuPy/CUDA device")
+    config.addinivalue_line("markers", "slow: takes more than ~30 s")
 
 
 @pytest.fixture(scope="session")

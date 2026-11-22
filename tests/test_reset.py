@@ -45,13 +45,14 @@ def test_spike_times_match_reference(gpu, sim, params):
     cfg = DEFAULT
     a, b, c, d = params
     t_end = 400.0
-    short = replace(cfg.grid, t_total=t_end, t_transient=10.0)
+    short = replace(cfg.grid, t_total=t_end, t_transient=10.0,
+                    t_steady_end=t_end)
     g = grid_for_dt(short, 0.001, dt_out=cfg.grid.dt_out)
     P = np.array([[a, b, c, d]], dtype=np.float64)
-    res = sim.run(P, grid=g, store_traces=False, max_spikes=256, refine=False)
-    got = res.spike_times[0]
-    got = got[np.isfinite(got)]
-    want = reference_spikes(a, b, c, d, cfg.model.I, cfg.model.v0, t_end)
+    I = cfg.model.I_legacy
+    res = sim.run(P, I, grid=g, store_traces=False, max_spikes=256, refine=False)
+    got = res.spikes.get(0)
+    want = reference_spikes(a, b, c, d, I, cfg.model.v0, t_end)
     n = min(got.size, want.size)
     assert n >= 8, (got.size, want.size)
     err = np.abs(got[:n] - want[:n])
@@ -73,10 +74,11 @@ def test_spike_times_match_reference(gpu, sim, params):
 def test_peak_equalisation(gpu, sim):
     """Spiking samples are emitted as exactly +30 mV (§7.1)."""
     cfg = DEFAULT
-    short = replace(cfg.grid, t_total=200.0, t_transient=10.0)
+    short = replace(cfg.grid, t_total=200.0, t_transient=10.0,
+                    t_steady_end=200.0)
     g = grid_for_dt(short, cfg.grid.dt_int, dt_out=cfg.grid.dt_out)
     P = np.array([[0.02, 0.2, -65.0, 8.0]])
-    tr = sim.run(P, grid=g, filter_on=False, out_start=0,
+    tr = sim.run(P, cfg.model.I_legacy, grid=g, out_start=0,
                  n_out=g.n_out_total, refine=False).traces[0]
     peaks = tr[tr > 29.0]
     assert peaks.size > 2

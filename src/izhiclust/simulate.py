@@ -1,33 +1,31 @@
 """RawModule wrapper: chunked GPU integration plus the dt/4 refinement pass.
 
-SPEC.md §7 (integrator), §7.3 (per-sample adaptivity), §7.5 (kernel layout).
+SPEC.md v1 §7 (integrator), v1 §7.3 (per-sample adaptivity), v1 §7.5 (kernel
+layout).  IMPROVEMENTS.md §3.1 (spike-time capture), §4 (per-sample drive).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import math
 import os
-from typing import Optional
+from typing import List, Optional, Sequence
 
 import numpy as np
 
 from .config import Config, Grid
 
-NDIAG = 12
+NDIAG = 14
 _DIAG_FIELDS = (
     "n_spikes", "isi_sum", "isi_sumsq", "isi_min", "isi_max", "first_isi",
     "last_isi", "mean_v", "sd_v", "max_local_error", "finite", "n_spikes_all",
+    "n_spikes_recorded", "overflow",
 )
 
 _KERNEL_PATH = os.path.join(os.path.dirname(__file__), "kernel.cu")
 
 
 def grid_for_dt(base: Grid, dt: float, dt_out: Optional[float] = None) -> Grid:
-    """A Grid at integration step `dt`, keeping `dt_out` (default: base's).
-
-    `L` must be an integer and the transient must land on an output sample;
-    both hold for every dt used by the convergence gate (§7.4).
-    """
+    """A Grid at integration step `dt`, keeping `dt_out` (default: base's)."""
     target_out = base.dt_out if dt_out is None else dt_out
     L = max(1, int(round(target_out / dt)))
     g = replace(base, dt_int=dt, L=L)
@@ -40,13 +38,89 @@ def grid_for_dt(base: Grid, dt: float, dt_out: Optional[float] = None) -> Grid:
     return g
 
 
+# ------------------------------------------------------------- spike trains
+
+
+@dataclass
+class SpikeTrains:
+    """Ragged spike times (ms), CSR-style: `times[offsets[i]:offsets[i+1]]`."""
+    times: np.ndarray            # float32, concatenated
+    offsets: np.ndarray          # int64, (n + 1,)
+    overflow: np.ndarray         # bool, (n,)
+
+    @property
+    def n(self) -> int:
+        return self.offsets.size - 1
+
+    @property
+    def counts(self) -> np.ndarray:
+        return np.diff(self.offsets)
+
+    def get(self, i: int) -> np.ndarray:
+        return self.times[self.offsets[i]:self.offsets[i + 1]]
+
+    def subset(self, idx: Sequence[int]) -> "SpikeTrains":
+        idx = np.asarray(idx, dtype=np.int64)
+        parts = [self.times[self.offsets[i]:self.offsets[i + 1]] for i in idx]
+        counts = np.array([p.size for p in parts], dtype=np.int64)
+        off = np.zeros(idx.size + 1, dtype=np.int64)
+        np.cumsum(counts, out=off[1:])
+        times = (np.concatenate(parts) if parts else
+                 np.zeros(0, dtype=np.float32))
+        return SpikeTrains(times.astype(np.float32, copy=False), off,
+                           self.overflow[idx].copy())
+
+    @staticmethod
+    def concat(parts: Sequence["SpikeTrains"]) -> "SpikeTrains":
+        parts = [p for p in parts if p is not None]
+        if not parts:
+            return SpikeTrains(np.zeros(0, np.float32), np.zeros(1, np.int64),
+                               np.zeros(0, bool))
+        times = np.concatenate([p.times for p in parts])
+        counts = np.concatenate([p.counts for p in parts])
+        off = np.zeros(counts.size + 1, dtype=np.int64)
+        np.cumsum(counts, out=off[1:])
+        return SpikeTrains(times, off,
+                           np.concatenate([p.overflow for p in parts]))
+
+    @staticmethod
+    def from_dense(dense: np.ndarray, counts: np.ndarray,
+                   overflow: np.ndarray) -> "SpikeTrains":
+        """`dense` is (max_spikes, n) as written by the kernel."""
+        counts = counts.astype(np.int64)
+        off = np.zeros(counts.size + 1, dtype=np.int64)
+        np.cumsum(counts, out=off[1:])
+        times = np.empty(int(off[-1]), dtype=np.float32)
+        for i in range(counts.size):
+            times[off[i]:off[i + 1]] = dense[:counts[i], i]
+        return SpikeTrains(times, off, overflow.astype(bool))
+
+    def replace_rows(self, rows: np.ndarray, other: "SpikeTrains") -> "SpikeTrains":
+        """Return a copy with `rows` taken from `other` (row k <- other row k)."""
+        rows = np.asarray(rows, dtype=np.int64)
+        parts: List[np.ndarray] = []
+        counts = self.counts.copy()
+        pos = {int(r): k for k, r in enumerate(rows)}
+        for i in range(self.n):
+            if i in pos:
+                parts.append(other.get(pos[i]))
+            else:
+                parts.append(self.get(i))
+            counts[i] = parts[-1].size
+        off = np.zeros(self.n + 1, dtype=np.int64)
+        np.cumsum(counts, out=off[1:])
+        ov = self.overflow.copy()
+        ov[rows] = other.overflow
+        return SpikeTrains(np.concatenate(parts).astype(np.float32), off, ov)
+
+
 @dataclass
 class SimResult:
-    traces: Optional[np.ndarray]        # (n, n_out) float32, analysis window
+    traces: Optional[np.ndarray]        # (n, n_out) float32
     u_traces: Optional[np.ndarray]
     diag: dict                          # name -> (n,) array
     isi_hist: np.ndarray                # (n, 32) int32
-    spike_times: Optional[np.ndarray]   # (n, max_spikes) float32, NaN-padded
+    spikes: Optional[SpikeTrains]
     grid: Grid
     n_refined: int = 0
 
@@ -66,8 +140,9 @@ class Simulator:
         self.kernel = self.module.get_function("izhi_sweep")
 
     # ------------------------------------------------------------------
-    def _launch(self, par_d, grid: Grid, *, store_traces, store_u, filter_on,
-                max_spikes, traces_d=None, u_d=None, out_start=None, n_out=None):
+    def _launch(self, par_d, drive_d, grid: Grid, *, store_traces, store_u,
+                peak_hold, max_spikes, traces_d=None, u_d=None,
+                out_start=None, n_out=None):
         cp = self.cp
         cfg = self.cfg
         n = par_d.shape[0]
@@ -81,7 +156,7 @@ class Simulator:
             traces_d = cp.empty((n_out, n), dtype=cp.float32)
         if store_u and u_d is None:
             u_d = cp.empty((n_out, n), dtype=cp.float32)
-        spk_d = (cp.full((max_spikes, n), cp.nan, dtype=cp.float32)
+        spk_d = (cp.zeros((max_spikes, n), dtype=cp.float32)
                  if max_spikes > 0 else dummy)
 
         tpb = cfg.numerics.threads_per_block
@@ -90,14 +165,15 @@ class Simulator:
         inv_span = 1.0 / (math.log10(dg.isi_hi) - log_lo)
         self.kernel(
             (blocks,), (tpb,),
-            (np.int32(n), par_d,
-             np.float64(cfg.model.I), np.float64(cfg.model.v0),
+            (np.int32(n), par_d, drive_d,
+             np.float64(cfg.model.v0),
              np.float64(grid.dt_int), np.int64(grid.n_steps), np.int32(grid.L),
              np.int32(out_start), np.int32(n_out),
              np.int32(1 if store_traces else 0),
-             np.int32(1 if filter_on else 0),
+             np.int32(1 if peak_hold else 0),
              np.int32(1 if store_u else 0),
-             np.int64(grid.win_start_step), np.float64(cfg.model.v_peak),
+             np.int64(grid.win_start_step), np.int64(grid.win_end_step),
+             np.float64(cfg.model.v_peak),
              np.float64(log_lo), np.float64(inv_span), np.int32(dg.n_isi_bins),
              traces_d if store_traces else dummy,
              u_d if store_u else dummy,
@@ -106,29 +182,35 @@ class Simulator:
         return traces_d, u_d, diag_d, hist_d, spk_d
 
     # ------------------------------------------------------------------
-    def run(self, params: np.ndarray, *, grid: Optional[Grid] = None,
+    def run(self, params: np.ndarray, drive, *, grid: Optional[Grid] = None,
             store_traces: bool = True, store_u: bool = False,
-            filter_on: bool = True, max_spikes: int = 0,
+            peak_hold: bool = True, max_spikes: int = 0,
             refine: bool = True, want_device_traces: bool = False,
             out_start: Optional[int] = None, n_out: Optional[int] = None):
         """Integrate one batch (<= chunk) of parameter sets.
 
-        `params` is (n, 4) = (a, b, c, d).  Returns a SimResult; if
-        `want_device_traces` the traces come back as a device array of shape
-        (n, n_out) instead of a host array (saves a round trip before the FFT).
+        `params` is (n, 4) = (a, b, c, d); `drive` is the per-sample `I`
+        (scalar or (n,)).  Returns a SimResult.
         """
         cp = self.cp
         grid = grid or self.cfg.grid
-        par = np.ascontiguousarray(params, dtype=np.float64)
+        par = np.ascontiguousarray(params[:, :4], dtype=np.float64)
         n = par.shape[0]
+        dr = np.broadcast_to(np.asarray(drive, dtype=np.float64), (n,))
+        dr = np.ascontiguousarray(dr)
         par_d = cp.asarray(par)
+        drive_d = cp.asarray(dr)
 
         traces_d, u_d, diag_d, hist_d, spk_d = self._launch(
-            par_d, grid, store_traces=store_traces, store_u=store_u,
-            filter_on=filter_on, max_spikes=max_spikes,
+            par_d, drive_d, grid, store_traces=store_traces, store_u=store_u,
+            peak_hold=peak_hold, max_spikes=max_spikes,
             out_start=out_start, n_out=n_out)
 
         diag = cp.asnumpy(diag_d)
+        spikes = None
+        if max_spikes > 0:
+            spikes = SpikeTrains.from_dense(cp.asnumpy(spk_d), diag[:, 12],
+                                            diag[:, 13] > 0.5)
         n_refined = 0
         if refine:
             tol = self.cfg.numerics.local_error_tol
@@ -138,17 +220,23 @@ class Simulator:
                 fine = grid_for_dt(grid, grid.dt_int / self.cfg.numerics.refine_factor,
                                    dt_out=grid.dt_out)
                 sub = cp.asarray(np.ascontiguousarray(par[bad]))
-                t2, u2, d2, h2, _ = self._launch(
-                    sub, fine, store_traces=store_traces, store_u=store_u,
-                    filter_on=filter_on, max_spikes=0,
+                sub_dr = cp.asarray(np.ascontiguousarray(dr[bad]))
+                t2, u2, d2, h2, s2 = self._launch(
+                    sub, sub_dr, fine, store_traces=store_traces,
+                    store_u=store_u, peak_hold=peak_hold, max_spikes=max_spikes,
                     out_start=out_start, n_out=n_out)
-                diag[bad] = cp.asnumpy(d2)
+                d2h = cp.asnumpy(d2)
+                if max_spikes > 0:
+                    fine_sp = SpikeTrains.from_dense(cp.asnumpy(s2), d2h[:, 12],
+                                                     d2h[:, 13] > 0.5)
+                    spikes = spikes.replace_rows(bad, fine_sp)
+                diag[bad] = d2h
                 hist_d[bad] = h2
                 if store_traces:
                     traces_d[:, bad] = t2
                 if store_u:
                     u_d[:, bad] = u2
-                del t2, u2, d2, h2, sub
+                del t2, u2, d2, h2, s2, sub, sub_dr
 
         out_traces = None
         out_u = None
@@ -163,24 +251,31 @@ class Simulator:
             out_u = cp.asnumpy(cp.ascontiguousarray(u_d.T))
             del u_d
 
-        spikes = None
-        if max_spikes > 0:
-            spikes = cp.asnumpy(spk_d).T.copy()
-
         dd = {name: diag[:, j] for j, name in enumerate(_DIAG_FIELDS)}
         res = SimResult(traces=out_traces, u_traces=out_u, diag=dd,
-                        isi_hist=cp.asnumpy(hist_d), spike_times=spikes,
+                        isi_hist=cp.asnumpy(hist_d), spikes=spikes,
                         grid=grid, n_refined=n_refined)
-        del par_d, diag_d, hist_d, spk_d
+        del par_d, drive_d, diag_d, hist_d, spk_d
         cp.get_default_memory_pool().free_all_blocks()
         return res
+
+    # ------------------------------------------------------------------
+    def spike_counts(self, params: np.ndarray, drive, grid: Grid) -> np.ndarray:
+        """Spikes in `grid`'s window only -- the rheobase test (§4.2)."""
+        res = self.run(params, drive, grid=grid, store_traces=False,
+                       refine=False, max_spikes=0)
+        return res.diag["n_spikes"]
 
 
 # ------------------------------------------------------- host-side diagnostics
 
 
 def host_diagnostics(diag: dict, isi_hist: np.ndarray, cfg: Config) -> dict:
-    """Derive rate, CV(ISI), burst index, spikes/burst, adaptation (§7.6)."""
+    """The v1 §7.6 in-kernel diagnostics, retained as a cross-check (§3.1).
+
+    The authoritative descriptors are computed from the exact spike times in
+    `isi.descriptors`; these are the quantised, in-register versions.
+    """
     dg = cfg.diag
     win_s = cfg.grid.window_seconds
     n_spikes = diag["n_spikes"]
@@ -196,7 +291,6 @@ def host_diagnostics(diag: dict, isi_hist: np.ndarray, cfg: Config) -> dict:
         var_isi = np.where(np.isfinite(var_isi), np.maximum(var_isi, 0.0), np.nan)
         cv_isi = np.sqrt(var_isi) / mean_isi
 
-    # log-ISI histogram bin edges (§7.6): 32 bins, 0.1 ms .. 2000 ms
     log_lo, log_hi = math.log10(dg.isi_lo), math.log10(dg.isi_hi)
     edges = np.logspace(log_lo, log_hi, dg.n_isi_bins + 1)
     centres = np.sqrt(edges[:-1] * edges[1:])
@@ -205,7 +299,6 @@ def host_diagnostics(diag: dict, isi_hist: np.ndarray, cfg: Config) -> dict:
     below = np.zeros_like(rate)
     above = np.zeros_like(rate)
     hist = isi_hist.astype(np.float64)
-    # fractional credit for the bin straddling the threshold
     for k in range(dg.n_isi_bins):
         lo, hi = edges[k], edges[k + 1]
         frac = np.clip((thresh - lo) / (hi - lo), 0.0, 1.0)

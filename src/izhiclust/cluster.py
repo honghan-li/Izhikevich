@@ -11,9 +11,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-# `Z` is reserved for quarantine and `X` for non-finite samples (§12.4), so
-# the cluster alphabet skips both.
-_ALPHABET = [c for c in string.ascii_uppercase if c not in ("X", "Z")]
+# `Z` (quiescent), `S` (subthreshold), `W` (sparse) and `X` (non-finite) name
+# the held-out classes of §3.4, so the cluster alphabet skips all four.
+_ALPHABET = [c for c in string.ascii_uppercase if c not in ("S", "W", "X", "Z")]
 
 
 def letter_sequence(n: int) -> List[str]:
@@ -37,15 +37,11 @@ def assign_letters(labels: np.ndarray) -> Dict[int, str]:
     return {int(ids[j]): letters[k] for k, j in enumerate(order)}
 
 
-# ------------------------------------------------------------- quarantine
+# ------------------------------------------------------------- classes
 
-
-def quarantine_masks(diag: Dict[str, np.ndarray], ac_power: np.ndarray,
-                     p_floor: float) -> Tuple[np.ndarray, np.ndarray]:
-    """(quarantine Z, non-finite X) masks per §10."""
-    bad = diag["finite"] < 0.5
-    silent = (diag["n_spikes"] <= 0) & (ac_power < p_floor) & ~bad
-    return silent, bad
+# The `Z`/`S`/`W`/`X` classes of IMPROVEMENTS.md §3.4 live in `isi.classify`:
+# they are gated on `sd(v)` and the ISI count, not on `ac_power`, because C9
+# removes the batched rFFT that `ac_power` needed.
 
 
 # ------------------------------------------------------------------- PCA
@@ -61,23 +57,39 @@ def fit_pca(F: np.ndarray, n_components: int, seed: int = 0):
 
 
 def fit_pca_adaptive(F: np.ndarray, n_min: int, min_evr: float, seed: int = 0):
-    """PCA with `n_components` raised until cumulative EVR reaches `min_evr`.
+    """PCA with `n_components` set to where the cumulative EVR reaches `min_evr`.
 
-    §12.1 asserts 50 components retain >99% of the variance and instructs that
-    if they fall short, `n_components` must be raised rather than the check
-    relaxed (§17.10).  That is what this does; the full variance curve and the
-    chosen component count are recorded in the manifest.
+    §8.1 turns the v1 accommodation into a gate: the component count needed for
+    99% of the variance must be <= 20, and that count is what the pipeline then
+    uses.  The variance curve comes from a covariance eigendecomposition, which
+    is the cheap way to get all of it at N ~ 10^5.
     """
     from sklearn.decomposition import PCA
     cap = int(min(F.shape[1], min(F.shape) - 1))
-    full = PCA(n_components=cap, whiten=False, svd_solver="full",
+    full = PCA(n_components=cap, whiten=False, svd_solver="covariance_eigh",
                random_state=seed).fit(F)
     curve = np.cumsum(full.explained_variance_ratio_)
     k = int(np.searchsorted(curve, min_evr) + 1)
     k = int(min(cap, max(n_min, k)))
-    pca = PCA(n_components=k, whiten=False, svd_solver="full", random_state=seed)
-    scores = pca.fit_transform(F)
-    return scores.astype(np.float32), pca, curve
+    scores = full.transform(F)[:, :k].astype(np.float32)
+    pca = _PCASlice(full, k)
+    return np.ascontiguousarray(scores), pca, curve
+
+
+class _PCASlice:
+    """The first `k` components of a fitted PCA, with a matching `transform`."""
+
+    def __init__(self, pca, k: int):
+        self._pca = pca
+        self.k = int(k)
+        self.explained_variance_ratio_ = pca.explained_variance_ratio_[:k]
+        self.n_components_ = int(k)
+        self.components_ = pca.components_[:k]
+        self.mean_ = pca.mean_
+
+    def transform(self, X):
+        return np.ascontiguousarray(
+            self._pca.transform(X)[:, :self.k].astype(np.float32))
 
 
 # ------------------------------------------------------------------ UMAP
@@ -193,8 +205,12 @@ def full_fit(E: np.ndarray, *, min_cluster_size: int, min_samples: int,
 
 @dataclass
 class SweepRow:
+    """One row of the two-stage selection sweep (v1 §12.4, amended by §3.3).
+
+    Stage 2 now sweeps the ISI representation parameters (KDE bandwidth and
+    block weights) in place of the retired spectral tilt.
+    """
     stage: int
-    alpha: float
     n_neighbors: int
     min_cluster_size: int
     min_samples: int
@@ -204,10 +220,18 @@ class SweepRow:
     relative_validity: float
     score: float
     seconds: float
+    h: float = float("nan")
+    w_a: float = float("nan")
+    w_b: float = float("nan")
+    w_c: float = float("nan")
+    w_d: float = float("nan")
+    w_onset: float = float("nan")
+    pca_components: int = 0
+    label: str = ""
 
 
 def sweep_stage1(P: np.ndarray, cfg, log=print) -> Tuple[List[SweepRow], Dict]:
-    """Clustering parameters at alpha = 0, with tree reuse (§12.4.1)."""
+    """Clustering parameters at the default ISI weights, with tree reuse."""
     cl = cfg.clustering
     mss = cl.sweep_fast_min_samples if cfg.sweep_fast else cl.sweep_min_samples
     rows: List[SweepRow] = []
@@ -239,8 +263,8 @@ def sweep_stage1(P: np.ndarray, cfg, log=print) -> Tuple[List[SweepRow], Dict]:
                     sc, rv, nf, ncl = score_labelling(m, labels, cfg)
                     dt = time.time() - t1
                     timings["extract"] += dt
-                    rows.append(SweepRow(1, 0.0, nn, mcs, ms, method, ncl, nf,
-                                         rv, sc, dt))
+                    rows.append(SweepRow(1, nn, mcs, ms, method, ncl, nf,
+                                         rv, sc, dt, label="stage1"))
                     log(f"  [stage1] nn={nn:3d} mcs={mcs:4d} ms={ms:3d} "
                         f"{method:4s}: k={ncl:3d} noise={nf:.3f} rv={rv:.4f} "
                         f"score={sc:.4f} ({dt:.1f}s, tree {t_tree:.1f}s)")

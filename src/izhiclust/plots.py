@@ -29,10 +29,42 @@ def _letters_for(labels: np.ndarray, letters: Dict[int, str]) -> np.ndarray:
     return np.array([letters.get(int(l), "noise") for l in labels], dtype=object)
 
 
+def _spread(anchors: Sequence, fontsize: float, iters: int = 400):
+    """Push overlapping label positions apart, in data coordinates.
+
+    A plain repulsion between label centres: each pair closer than the
+    estimated label size is separated a little, every pass, with a weak spring
+    back to the anchor so labels stay near their cluster.
+    """
+    P = np.asarray(anchors, dtype=np.float64)
+    if P.shape[0] < 2:
+        return P
+    span = max(float(np.ptp(P[:, 0])), float(np.ptp(P[:, 1])), 1e-9)
+    r = span * (0.015 + 0.0024 * fontsize)        # ~ one label box
+    pos = P.copy()
+    for _ in range(iters):
+        d = pos[:, None, :] - pos[None, :, :]
+        dist = np.hypot(d[..., 0], d[..., 1])
+        np.fill_diagonal(dist, np.inf)
+        close = dist < r
+        if not close.any():
+            break
+        push = np.zeros_like(pos)
+        ii, jj = np.where(close)
+        v = d[ii, jj]
+        n = np.maximum(dist[ii, jj], 1e-9)[:, None]
+        step = v / n * ((r - dist[ii, jj])[:, None] * 0.5)
+        np.add.at(push, ii, step)
+        pos += 0.5 * push
+        pos += 0.03 * (P - pos)                   # spring back to the anchor
+    return pos
+
+
 def scatter_2d(path: str, E2: np.ndarray, labels: np.ndarray,
                letters: Dict[int, str], quarantine: np.ndarray,
                placement_xy: Sequence, flags: Dict[str, Dict[int, bool]],
-               names: Dict[int, str], show: bool = True, dpi: int = 200):
+               names: Dict[int, str], show: bool = True, dpi: int = 200,
+               title: str = "", held_out: str = ""):
     """`placement_xy` is a sequence of (type label, cluster letter, x, y)."""
     import matplotlib.pyplot as plt
 
@@ -43,29 +75,37 @@ def scatter_2d(path: str, E2: np.ndarray, labels: np.ndarray,
     if quarantine.any():
         ax.scatter(E2[quarantine, 0], E2[quarantine, 1], s=4, c="0.45",
                    marker="x", linewidths=0.4,
-                   label=f"Z quarantine ({int(quarantine.sum())})", rasterized=True)
+                   label=f"held out ({int(quarantine.sum())})", rasterized=True)
 
     ids = sorted((cid for cid in np.unique(labels) if cid >= 0),
                  key=lambda c: letters.get(int(c), "zz"))
     cmap = plt.get_cmap("turbo")
     # keep the labels legible as the cluster count grows
     n_ids = len(ids)
-    fs = 13 if n_ids <= 30 else 10 if n_ids <= 60 else 7
+    fs = 13 if n_ids <= 30 else 9 if n_ids <= 60 else 7
+    anchors, tags = [], []
     for k, cid in enumerate(ids):
         m = labels == cid
         col = cmap((k + 0.5) / max(len(ids), 1))
         ax.scatter(E2[m, 0], E2[m, 1], s=3, color=col, linewidths=0,
                    rasterized=True)
-        cx, cy = E2[m, 0].mean(), E2[m, 1].mean()
-        tag = letters[int(cid)]
         extra = ""
         if flags.get("unstable", {}).get(int(cid)):
             extra += "*"
         if flags.get("multimodal", {}).get(int(cid)):
             extra += "†"
-        ax.annotate(tag + extra, (cx, cy), fontsize=fs, fontweight="bold",
-                    ha="center", va="center",
-                    bbox=dict(boxstyle="round,pad=0.18", fc="white", alpha=0.75,
+        anchors.append((float(E2[m, 0].mean()), float(E2[m, 1].mean())))
+        tags.append(letters[int(cid)] + extra)
+    # Cluster centroids pile up where the taxonomy is finest, which is exactly
+    # where the labels matter; nudge them apart and draw a leader line back to
+    # the centroid so every cluster stays lettered (the objective asks for
+    # A, B, C, ... on the scatter) without the boxes overprinting each other.
+    for (cx, cy), (lx, ly), tag in zip(anchors, _spread(anchors, fs), tags):
+        ax.annotate(tag, xy=(cx, cy), xytext=(lx, ly), fontsize=fs,
+                    fontweight="bold", ha="center", va="center", zorder=4,
+                    arrowprops=dict(arrowstyle="-", lw=0.4, color="0.45",
+                                    shrinkA=0.0, shrinkB=1.0),
+                    bbox=dict(boxstyle="round,pad=0.18", fc="white", alpha=0.8,
                               ec="0.4", lw=0.5))
 
     for lab, letter, x, y in placement_xy:
@@ -91,8 +131,11 @@ def scatter_2d(path: str, E2: np.ndarray, labels: np.ndarray,
               markerscale=3)
     ax.set_xlabel("UMAP-2D 1")
     ax.set_ylabel("UMAP-2D 2")
-    ax.set_title(f"Izhikevich firing-pattern clusters — {len(ids)} clusters, "
-                 f"N = {labels.size} (I = 10)")
+    ax.set_title(title or f"Izhikevich firing-pattern clusters — "
+                 f"{len(ids)} clusters, N = {labels.size}")
+    if held_out:
+        ax.text(0.995, 0.005, held_out, transform=ax.transAxes, ha="right",
+                va="bottom", fontsize=8, color="0.35")
     fig.tight_layout()
     fig.savefig(path, dpi=dpi)
     if show:
@@ -139,8 +182,9 @@ def representative_figure(path: str, *, t_ms: np.ndarray, v: np.ndarray,
     sel = f_hz <= 500.0
     ax1.plot(f_hz[sel], mag[sel], lw=0.6, color="#1f4e79")
     ax1.set_xlabel("frequency (Hz)")
-    ax1.set_ylabel("|rFFT| (deconvolved)")
+    ax1.set_ylabel("amplitude (mV)")
     ax1.set_xlim(0, 500)
+    ax1.set_ylim(bottom=0.0)
     _annotate_peaks(ax1, f_hz, mag, n=5, f_hi=500.0)
 
     ins = ax1.inset_axes([0.55, 0.45, 0.42, 0.5])
@@ -150,8 +194,8 @@ def representative_figure(path: str, *, t_ms: np.ndarray, v: np.ndarray,
     ins.tick_params(labelsize=6)
     ins.set_title("log f, 0.5–1000 Hz", fontsize=7)
 
-    fig.suptitle(title, fontsize=10)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.suptitle(title, fontsize=9)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
 

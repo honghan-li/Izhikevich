@@ -1,4 +1,4 @@
-"""CSV / npz / manifest writing (SPEC.md §16) plus the round-trip check."""
+"""CSV / npz / manifest writing (v1 §16, amended by §3.5) and the round trip."""
 from __future__ import annotations
 
 import json
@@ -14,9 +14,11 @@ import pandas as pd
 
 from .config import Config
 
-CHUNK_ROWS = 2048          # §8: chunked to_csv(mode='a')
-TRACE_FMT = "%.4g"         # §16.2
-SPECTRA_FMT = "%.6g"       # §16.2
+CHUNK_ROWS = 2048          # v1 §8: chunked append
+TRACE_FMT = "%.4g"         # v1 §16.2
+# `%.9g` round-trips a float32 exactly, which is what the kernel writes; the
+# §9 round-trip criterion is 1e-6 relative, so the file must not quantise.
+SPIKE_FMT = "%.9g"
 
 
 def ensure_dirs(cfg: Config) -> Dict[str, str]:
@@ -32,14 +34,7 @@ def write_matrix_csv(path: str, M: np.ndarray, sample_ids: np.ndarray,
                      col_names: Sequence[str], float_format: str,
                      gzip: bool = False, chunk: int = CHUNK_ROWS,
                      log=print) -> float:
-    """Chunked writer for the two bulk files (§8), via `np.savetxt`.
-
-    Amendment A6 (SPEC §19): §8 assumed `pandas.to_csv` at 60-100 MB/s and
-    `numpy.savetxt` at ~10 MB/s.  Measured here (pandas 3.1.1, numpy 2.5.5) it
-    is the other way round -- 10 MB/s for `to_csv(float_format=...)` against
-    55 MB/s for `savetxt` -- so the bulk writer uses `savetxt` over an open
-    handle, keeping the same chunked-append structure and output format.
-    """
+    """Chunked writer via `np.savetxt` (v1 §19 A6: it is the faster of the two)."""
     import gzip as gziplib
     if gzip and not path.endswith(".gz"):
         path = path + ".gz"
@@ -51,7 +46,7 @@ def write_matrix_csv(path: str, M: np.ndarray, sample_ids: np.ndarray,
         fh.write("sample_id," + ",".join(col_names) + "\n")
         for s in range(0, n, chunk):
             sl = slice(s, min(s + chunk, n))
-            block = np.empty((sl.stop - sl.start, m + 1), dtype=np.float32)
+            block = np.empty((sl.stop - sl.start, m + 1), dtype=np.float64)
             block[:, 0] = sample_ids[sl]
             block[:, 1:] = M[sl]
             np.savetxt(fh, block, fmt=fmt, delimiter=",")
@@ -62,16 +57,54 @@ def write_matrix_csv(path: str, M: np.ndarray, sample_ids: np.ndarray,
     return dt
 
 
+def write_spike_times_csv(path: str, spikes, sample_ids: np.ndarray,
+                          gzip: bool = False, log=print) -> float:
+    """§3.5 `spike_times.csv`: ragged, one row per sample.
+
+    Columns `sample_id, n_spikes, spike_times_ms`, the third field a
+    space-separated list so the file stays a valid rectangular CSV while the
+    payload is ragged (assumption V2-A11).
+    """
+    import gzip as gziplib
+    if gzip and not path.endswith(".gz"):
+        path = path + ".gz"
+    t0 = time.time()
+    opener = gziplib.open if path.endswith(".gz") else open
+    with opener(path, "wt", newline="\n") as fh:
+        fh.write("sample_id,n_spikes,spike_times_ms\n")
+        for i in range(spikes.n):
+            t = spikes.get(i)
+            fh.write(f"{int(sample_ids[i])},{t.size}," + " ".join(
+                SPIKE_FMT % v for v in t) + "\n")
+    dt = time.time() - t0
+    size = os.path.getsize(path) / 2 ** 30
+    log(f"  wrote {os.path.basename(path)}: {spikes.n} rows, {size:.2f} GiB, "
+        f"{dt:.1f}s")
+    return dt
+
+
+def read_spike_times_csv(path: str, n_rows: Optional[int] = None):
+    """Inverse of `write_spike_times_csv`; returns (ids, SpikeTrains)."""
+    from .simulate import SpikeTrains
+    df = pd.read_csv(path, nrows=n_rows)
+    ids = df["sample_id"].to_numpy()
+    parts = [np.fromstring(s, sep=" ", dtype=np.float32) if isinstance(s, str)
+             else np.zeros(0, dtype=np.float32)
+             for s in df["spike_times_ms"].fillna("")]
+    counts = np.array([p.size for p in parts], dtype=np.int64)
+    off = np.zeros(counts.size + 1, dtype=np.int64)
+    np.cumsum(counts, out=off[1:])
+    times = (np.concatenate(parts) if parts else np.zeros(0, np.float32))
+    return ids, SpikeTrains(times.astype(np.float32), off,
+                            np.zeros(counts.size, dtype=bool))
+
+
 def trace_columns(t_ms: np.ndarray) -> List[str]:
     return [f"t={v:.1f}" for v in t_ms]
 
 
 def freq_columns(f_hz: np.ndarray) -> List[str]:
     return [f"f={v:.1f}" for v in f_hz]
-
-
-def band_columns(f_hz: np.ndarray) -> List[str]:
-    return [f"f={v:.4g}" for v in f_hz]
 
 
 # ----------------------------------------------------------------- manifest
@@ -133,32 +166,28 @@ def write_manifest(path: str, payload: Dict, log=print):
 # ------------------------------------------------------------- round trip
 
 
-def roundtrip_check(trace_path: str, F_ref: np.ndarray, plan, cfg: Config,
-                    n_rows: int = 1024, exclude: Optional[np.ndarray] = None,
-                    log=print) -> Dict[str, float]:
-    """Re-read traces.csv and recompute §9; compare with features_bands.csv.
+def roundtrip_check(spike_path: str, F_ref: np.ndarray, cfg: Config, scales,
+                    weights, n_rows: int = 1024,
+                    include: Optional[np.ndarray] = None, log=print) -> Dict:
+    """§9: spike times -> features must reproduce `features_isi.csv` to 1e-6.
 
-    Evaluated over the samples that actually enter the clustering.  A sample
-    §10 quarantines is numerically silent: its banded spectrum is roundoff, so
-    its L2-normalised *shape* is arbitrary and the `%.4g` quantisation §16.2
-    specifies for traces.csv erases it.  Those rows are reported separately
-    rather than mixed into the criterion (§19 A7).
+    Re-reads `spike_times.csv`, recomputes the §3.2 steady-state blocks with
+    the recorded dataset-wide scales and block weights, and compares with the
+    feature matrix that was written.
     """
-    from .features import band_features, spectra
-    if not os.path.exists(trace_path):
-        return {"rows": 0, "rel_l2": float("nan")}
-    df = pd.read_csv(trace_path, nrows=n_rows)
-    ids = df["sample_id"].to_numpy()
-    V = df.drop(columns=["sample_id"]).to_numpy(dtype=np.float32)
-    F = np.asarray(band_features(spectra(V, plan), plan))
+    from . import isi as isim
+    if not os.path.exists(spike_path):
+        return {"rows": 0, "rel_l2_max": float("nan")}
+    ids, spikes = read_spike_times_csv(spike_path, n_rows=n_rows)
+    g = cfg.grid
+    s = isim.isi_set(spikes, g.t_transient, g.t_steady_end)
+    blocks = isim.compute_blocks(s, cfg, h=weights.h)
+    F = isim._l2_rows(isim.steady_vector(blocks, scales, weights))
     ref = F_ref[ids]
     nref = np.linalg.norm(ref, axis=1)
-    # Numerically silent samples have an all-zero feature vector (their
-    # spectral *shape* is undefined); §10 quarantines them and they carry no
-    # round-trip information.
     keep = nref > 0
-    if exclude is not None:
-        keep &= ~np.asarray(exclude)[ids]
+    if include is not None:
+        keep &= np.asarray(include)[ids]
     allrel = np.linalg.norm(F - ref, axis=1) / np.maximum(nref, 1e-30)
     rel = allrel[keep]
     other = allrel[~keep]
@@ -166,11 +195,9 @@ def roundtrip_check(trace_path: str, F_ref: np.ndarray, plan, cfg: Config,
            "rows_excluded": int((~keep).sum()),
            "rel_l2_max": float(rel.max()) if rel.size else float("nan"),
            "rel_l2_mean": float(rel.mean()) if rel.size else float("nan"),
-           "rel_l2_p90": float(np.percentile(rel, 90)) if rel.size else float("nan"),
            "rel_l2_p99": float(np.percentile(rel, 99)) if rel.size else float("nan"),
            "excluded_rel_l2_max": float(other.max()) if other.size else float("nan")}
     log(f"  round trip over {res['rows']} clustered rows: max rel L2 "
         f"{res['rel_l2_max']:.2e}, mean {res['rel_l2_mean']:.2e} "
-        f"({res['rows_excluded']} quarantined/zero-feature rows excluded, "
-        f"max there {res['excluded_rel_l2_max']:.2e})")
+        f"({res['rows_excluded']} held-out rows excluded)")
     return res

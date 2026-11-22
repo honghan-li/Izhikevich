@@ -1,9 +1,12 @@
 /* Izhikevich 2-D ODE-with-reset: fixed-step Dormand-Prince 5(4) with FSAL,
- * in-register cascaded-boxcar output stage and in-register diagnostics.
+ * in-kernel spike-time capture and in-register diagnostics.
  *
- * SPEC.md sections: §2 (model), §7 (integrator), §7.1 (reset + peak
- * equalisation), §7.2 (anti-aliased output), §7.3 (embedded error estimate),
- * §7.5 (layout), §7.6 (diagnostics).
+ * SPEC.md sections: v1 §2 (model), v1 §7 (integrator), v1 §7.1 (reset + peak
+ * equalisation), v1 §7.3 (embedded error estimate), v1 §7.5 (layout),
+ * v1 §7.6 (diagnostics).
+ * IMPROVEMENTS.md: §3.1 (C2 spike-time buffer), §3.5 (C9 — the cascaded-boxcar
+ * output stage is removed; traces are decimated for display only), §4 (C3 —
+ * the drive is per sample).
  *
  * One thread per parameter set; grid-stride.  State, coefficients and every
  * accumulator live in registers for the whole step loop.  Traces are written
@@ -11,12 +14,13 @@
  * addresses (fully coalesced).
  */
 
-#define NDIAG 12
+#define NDIAG 14
 /* diag[i*NDIAG + j]:
- *  0 n_spikes (analysis window)   1 isi_sum        2 isi_sumsq
+ *  0 n_spikes (steady window)     1 isi_sum        2 isi_sumsq
  *  3 isi_min                      4 isi_max        5 first_isi
  *  6 last_isi                     7 mean_v         8 sd_v
  *  9 max_local_error             10 finite flag   11 n_spikes (whole run)
+ * 12 n_spikes_recorded           13 overflow flag
  */
 
 /* ---- DP5 (Dormand-Prince 5(4)) tableau ------------------------------- */
@@ -54,7 +58,7 @@
 extern "C" __global__ void izhi_sweep(
     const int            n_batch,
     const double* __restrict__ par,      /* [n_batch*4]: a,b,c,d interleaved */
-    const double         I,
+    const double* __restrict__ drive,    /* [n_batch]: I per sample (§4) */
     const double         v0,
     const double         dt,
     const long long      n_steps,
@@ -62,9 +66,10 @@ extern "C" __global__ void izhi_sweep(
     const int            out_start,      /* first stored output-sample index */
     const int            n_out,          /* number of stored output samples */
     const int            store_traces,
-    const int            filter_on,      /* 1: cascaded boxcar; 0: peak-aware decimation */
+    const int            peak_hold,      /* 1: emit v_peak for a block that spiked */
     const int            store_u,
     const long long      win_start_step, /* 1-based step whose end is t_transient */
+    const long long      win_end_step,   /* 1-based step whose end is t_steady_end */
     const double         v_peak,
     const double         isi_log_lo,
     const double         isi_log_inv_span,
@@ -77,7 +82,6 @@ extern "C" __global__ void izhi_sweep(
     int* __restrict__    hist)
 {
     const long long n_blocks = n_steps / (long long)L;
-    const double inv_L2 = 1.0 / ((double)L * (double)L);
 
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n_batch;
          i += blockDim.x * gridDim.x) {
@@ -86,26 +90,23 @@ extern "C" __global__ void izhi_sweep(
         const double bb = par[4 * i + 1];
         const double cc = par[4 * i + 2];
         const double dd = par[4 * i + 3];
+        const double I  = drive[i];
 
         double v = v0;
         double u = bb * v0;                /* paper's initialisation, u = b*v */
 
-        /* boxcar state (§7.2): A = descending weights of this block,
-         * Bacc = ascending weights, Bprev carried from the previous block.
-         * out = (A + Bprev) / L^2 is exactly two cascaded length-L boxcars. */
-        double A = 0.0, Bacc = 0.0, Bprev = 0.0;
         double ulast = u, vlast = v0;
         int    spiked_block = 0;
 
-        /* diagnostics (§7.6) */
+        /* diagnostics (v1 §7.6), over the steady window only */
         double sum_v = 0.0, sum_v2 = 0.0;
         double isi_sum = 0.0, isi_sumsq = 0.0;
         double isi_min = 1.0e300, isi_max = -1.0e300;
         double first_isi = -1.0, last_isi = -1.0;
         double t_prev_spike = -1.0;
         double max_err = 0.0;
-        long long n_win = 0, n_spk = 0, n_spk_all = 0;
-        int finite_ok = 1;
+        long long n_win = 0, n_spk = 0, n_spk_all = 0, n_rec = 0;
+        int finite_ok = 1, overflow = 0;
 
         /* FSAL */
         double k1v = 0.0, k1u = 0.0;
@@ -113,7 +114,7 @@ extern "C" __global__ void izhi_sweep(
 
         long long step = 0;
         for (long long k = 0; k < n_blocks; ++k) {
-            A = 0.0; Bacc = 0.0; spiked_block = 0;
+            spiked_block = 0;
 
             for (int m = 1; m <= L; ++m) {
                 ++step;
@@ -150,7 +151,7 @@ extern "C" __global__ void izhi_sweep(
 
                 double vs;                                /* the emitted sample */
                 if (vn >= v_peak) {
-                    /* §7.1 peak equalisation, then the reset jump */
+                    /* v1 §7.1 peak equalisation, then the reset jump */
                     vs = v_peak;
                     v = cc;
                     u = un + dd;
@@ -158,9 +159,18 @@ extern "C" __global__ void izhi_sweep(
                     spiked_block = 1;
                     ++n_spk_all;
                     double ts = (double)step * dt;
-                    if (max_spikes > 0 && n_spk_all <= (long long)max_spikes)
-                        spike_t[(n_spk_all - 1) * (long long)n_batch + i] = (float)ts;
-                    if (step >= win_start_step) {
+                    /* §3.1: every spike time of the whole run, at dt_int
+                     * resolution, with a monotonic counter and an overflow
+                     * flag -- the ISI features are computed from these. */
+                    if (max_spikes > 0) {
+                        if (n_rec < (long long)max_spikes) {
+                            spike_t[n_rec * (long long)n_batch + i] = (float)ts;
+                            ++n_rec;
+                        } else {
+                            overflow = 1;
+                        }
+                    }
+                    if (step >= win_start_step && step <= win_end_step) {
                         ++n_spk;
                         if (t_prev_spike >= 0.0) {
                             double isi = ts - t_prev_spike;
@@ -177,11 +187,11 @@ extern "C" __global__ void izhi_sweep(
                             hist[(long long)i * n_isi_bins + bin] += 1;
                         }
                         t_prev_spike = ts;
-                    } else {
+                    } else if (step < win_start_step) {
                         t_prev_spike = ts;   /* so the first window ISI is honest */
                     }
                 } else {
-                    /* §7.3: the embedded 4(5) estimate is meaningful only on
+                    /* v1 §7.3: the embedded 4(5) estimate is meaningful only on
                      * steps without a reset. */
                     double ev = dt * (E1 * k1v + E3 * k3v + E4 * k4v + E5 * k5v
                                       + E6 * k6v + E7 * k7v);
@@ -196,12 +206,10 @@ extern "C" __global__ void izhi_sweep(
                     k1v = k7v; k1u = k7u;                 /* FSAL */
                 }
 
-                A    += (double)(L + 1 - m) * vs;
-                Bacc += (double)(m - 1) * vs;
                 vlast = vs;
                 ulast = u;
 
-                if (step >= win_start_step) {
+                if (step >= win_start_step && step <= win_end_step) {
                     sum_v += vs;
                     sum_v2 += vs * vs;
                     ++n_win;
@@ -210,9 +218,10 @@ extern "C" __global__ void izhi_sweep(
 
             if (!finite_ok) break;
 
-            double outv = filter_on ? (A + Bprev) * inv_L2
-                                    : (spiked_block ? v_peak : vlast);
-            Bprev = Bacc;
+            /* §3.5: no filter.  Decimation keeps the block's last sample, or
+             * the equalised peak if the block contained a spike, so a display
+             * trace at dt_out = 0.1 ms still shows every spike (V2-A5). */
+            double outv = (peak_hold && spiked_block) ? v_peak : vlast;
 
             if (store_traces) {
                 long long j = k - (long long)out_start;
@@ -240,5 +249,7 @@ extern "C" __global__ void izhi_sweep(
         D[9]  = max_err;
         D[10] = (double)finite_ok;
         D[11] = (double)n_spk_all;
+        D[12] = (double)n_rec;
+        D[13] = (double)overflow;
     }
 }

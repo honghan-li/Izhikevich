@@ -3,6 +3,8 @@ import numpy as np
 
 from izhiclust.stats import render_triangular, triangular_frame, COEFFS
 
+NAMES = list(COEFFS[:4])
+
 
 def test_triangular_frame_contents():
     rng = np.random.default_rng(0)
@@ -11,7 +13,7 @@ def test_triangular_frame_contents():
     df = triangular_frame(P)
     R = np.corrcoef(P, rowvar=False)
     sd = np.std(P, axis=0, ddof=1)
-    M = df[list(COEFFS)].to_numpy()
+    M = df[NAMES].to_numpy()
     for i in range(4):
         assert np.isclose(M[i, i], sd[i])
         for j in range(i):
@@ -28,12 +30,12 @@ def test_upper_triangle_renders_empty():
     text = render_triangular(triangular_frame(P))
     lines = [l for l in text.splitlines() if l.strip()]
     header, body = lines[0], lines[1:]
-    assert header.split()[:4] == list(COEFFS)
+    assert header.split()[:4] == NAMES
     # row i must have exactly i + 1 numeric entries among the 4 coefficient
     # columns (lower triangle + diagonal), the rest blank
     for i, line in enumerate(body[:4]):
         cells = line.split()
-        assert cells[0] == COEFFS[i]
+        assert cells[0] == NAMES[i]
         n_num = sum(1 for c in cells[1:] if _isnum(c))
         # lower triangle + diagonal, plus the sd_log_a column on the first row
         expect = i + 1 + (1 if i == 0 else 0)
